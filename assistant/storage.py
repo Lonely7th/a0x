@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Iterator
 
-from .config import now_utc_iso, strategy_manifest
+from .config import now_cn, now_utc_iso, strategy_manifest
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -195,6 +195,26 @@ CREATE TABLE IF NOT EXISTS actual_fills (
   happened_at TEXT NOT NULL,
   idempotency_key TEXT NOT NULL UNIQUE
 );
+CREATE TABLE IF NOT EXISTS real_positions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  watch_id INTEGER REFERENCES watchlist(id),
+  entry_date TEXT NOT NULL,
+  entry_price_cents INTEGER NOT NULL,
+  target_pct TEXT,
+  initial_stop_cents INTEGER,
+  trailing_line_cents INTEGER NOT NULL DEFAULT 0,
+  prior_peak_cents INTEGER,
+  peak_asof_date TEXT,
+  partial_done INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','closed')),
+  management_mode TEXT NOT NULL DEFAULT 'system' CHECK(management_mode IN ('system','user_managed')),
+  created_at TEXT NOT NULL,
+  closed_at TEXT,
+  legacy_actual_id INTEGER UNIQUE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_real_positions_code_open
+  ON real_positions(code) WHERE status='open';
 CREATE TABLE IF NOT EXISTS alerts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   event_key TEXT NOT NULL UNIQUE,
@@ -205,7 +225,12 @@ CREATE TABLE IF NOT EXISTS alerts (
   code TEXT,
   created_at TEXT NOT NULL,
   read_at TEXT,
-  resolved_at TEXT
+  resolved_at TEXT,
+  action_status TEXT,
+  acted_at TEXT,
+  reference_price_cents INTEGER,
+  real_position_id INTEGER REFERENCES real_positions(id),
+  action_kind TEXT
 );
 CREATE TABLE IF NOT EXISTS jobs (
   job_key TEXT PRIMARY KEY,
@@ -226,6 +251,7 @@ CREATE INDEX IF NOT EXISTS ix_focus_entry_date ON focus_watchlist(entry_date, ra
 CREATE INDEX IF NOT EXISTS ix_events_at ON events(at);
 CREATE INDEX IF NOT EXISTS ix_alerts_unread ON alerts(read_at, id);
 CREATE INDEX IF NOT EXISTS ix_positions_open ON positions(status, code);
+CREATE INDEX IF NOT EXISTS ix_virtual_legs_at_id ON virtual_legs(at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS ix_quote_samples_received ON quote_samples(received_at);
 CREATE INDEX IF NOT EXISTS ix_quote_polls_day ON quote_polls(trading_date);
 """
@@ -254,6 +280,56 @@ def init_db(path: Path) -> None:
         alert_names = {r["name"] for r in db.execute("PRAGMA table_info(alerts)")}
         if "resolved_at" not in alert_names:
             db.execute("ALTER TABLE alerts ADD COLUMN resolved_at TEXT")
+        for column, definition in (
+            ("action_status", "TEXT"), ("acted_at", "TEXT"),
+            ("reference_price_cents", "INTEGER"),
+            ("real_position_id", "INTEGER REFERENCES real_positions(id)"),
+            ("action_kind", "TEXT"),
+        ):
+            if column not in alert_names:
+                db.execute(f"ALTER TABLE alerts ADD COLUMN {column} {definition}")
+        db.execute("""
+            CREATE INDEX IF NOT EXISTS ix_alerts_real_history
+            ON alerts(action_status,acted_at DESC,id DESC)
+        """)
+        db.execute("""
+            CREATE INDEX IF NOT EXISTS ix_events_kind_at
+            ON events(kind,at DESC,seq DESC)
+        """)
+        if not db.execute("SELECT 1 FROM system_status WHERE key='legacy_actual_import'").fetchone():
+            db.execute("""
+                INSERT OR IGNORE INTO real_positions(
+                  code,watch_id,entry_date,entry_price_cents,target_pct,initial_stop_cents,
+                  trailing_line_cents,prior_peak_cents,peak_asof_date,partial_done,
+                  status,management_mode,created_at,closed_at,legacy_actual_id
+                ) SELECT code,watch_id,entry_date,entry_price_cents,target_pct,initial_stop_cents,
+                  trailing_line_cents,prior_peak_cents,peak_asof_date,partial_done,
+                  status,CASE WHEN watch_id IS NULL THEN 'user_managed' ELSE 'system' END,
+                  created_at,closed_at,id FROM actual_positions
+            """)
+            db.execute("INSERT INTO system_status VALUES('legacy_actual_import',?,?)",
+                       (json.dumps({"done": True}), now_utc_iso()))
+        # Old sell alerts have no frozen price, so they cannot be confirmed as proxy fills.
+        db.execute("""
+            UPDATE alerts SET action_status='legacy'
+            WHERE kind='actual_sell' AND action_status IS NULL
+        """)
+        db.execute("""
+            UPDATE alerts SET reference_price_cents=(
+              SELECT w.buy_limit_cents FROM events e JOIN watchlist w ON w.id=e.watch_id
+              WHERE e.event_key=alerts.event_key
+            ), action_kind='buy', action_status=CASE
+              WHEN substr(event_key,10,10)=? THEN 'pending' ELSE 'expired' END
+            WHERE kind='real_buy' AND action_status IS NULL
+        """, (now_cn().date().isoformat(),))
+        db.execute("""
+            UPDATE alerts SET action_status='legacy'
+            WHERE kind='real_buy' AND action_status='pending'
+              AND (reference_price_cents IS NULL OR EXISTS(
+                SELECT 1 FROM events e JOIN real_positions p ON p.watch_id=e.watch_id
+                WHERE e.event_key=alerts.event_key
+              ))
+        """)
         digest, manifest = strategy_manifest()
         db.execute(
             "INSERT OR IGNORE INTO strategy_versions VALUES(?,?,?,?)",
@@ -323,11 +399,16 @@ def append_event(db: sqlite3.Connection, key: str, kind: str, code: str | None,
 
 
 def alert(db: sqlite3.Connection, key: str, kind: str, level: str, title: str,
-          body: str, code: str | None = None) -> None:
+          body: str, code: str | None = None, *, reference_price_cents: int | None = None,
+          real_position_id: int | None = None, action_kind: str | None = None) -> None:
     db.execute(
-        """INSERT OR IGNORE INTO alerts(event_key,kind,level,title,body,code,created_at)
-           VALUES(?,?,?,?,?,?,?)""",
-        (key, kind, level, title, body, code, now_utc_iso()),
+        """INSERT OR IGNORE INTO alerts(
+             event_key,kind,level,title,body,code,created_at,action_status,
+             reference_price_cents,real_position_id,action_kind
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        (key, kind, level, title, body, code, now_utc_iso(),
+         "pending" if action_kind else None,
+         reference_price_cents, real_position_id, action_kind),
     )
 
 

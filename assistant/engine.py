@@ -12,7 +12,8 @@ from .money import buy_cost, dec, planned_shares, sell_proceeds, yuan
 from .quotes import Quote, QuoteRouter
 from .storage import (alert, append_event, available_budget, cash_balance, connect, set_status,
                       setting_for, transaction)
-from .strategy import (buy_limit_cents, first_target_cents, initial_stop_cents,
+from .strategy import (SURGE_CANDIDATE_THRESHOLD, SURGE_ORDER_BUDGET_CENTS,
+                       buy_limit_cents, first_target_cents, initial_stop_cents,
                        order_budget_cents,
                        stop_distance, strict_crossing, target_pct, trailing_cents,
                        virtual_exit)
@@ -175,7 +176,7 @@ class Engine:
             "SELECT code FROM positions WHERE status='open'"
         ).fetchall()
         actual = self.db.execute(
-            "SELECT code FROM actual_positions WHERE status='open'"
+            "SELECT code FROM real_positions WHERE status='open' AND management_mode='system'"
         ).fetchall()
         return list(dict.fromkeys([r[0] for r in [*watch, *virtual, *actual]]))
 
@@ -307,7 +308,7 @@ class Engine:
             abs(quote.preclose_cents / (float(watch["raw_close"]) * 100) - 1) > 0.02):
             return
         if self.db.execute(
-            "SELECT 1 FROM actual_positions WHERE code=? AND status='open'",
+            "SELECT 1 FROM real_positions WHERE code=? AND status='open'",
             (quote.code,),
         ).fetchone():
             return
@@ -317,11 +318,18 @@ class Engine:
                          watch["id"], None,
                          {"rank": watch["rank"],
                           "limit_cents": watch["buy_limit_cents"],
+                          "reference_price_cents": watch["buy_limit_cents"],
                           "order_budget_cents": watch["order_budget_cents"],
                           "source_time": quote.source_time.isoformat()})
-            alert(self.db, key, "real_buy", "action", "实盘买入条件已触发",
-                  f"限价 {yuan(watch['buy_limit_cents'])} 元；请人工核对盘口、账户资金和券商成交",
-                  quote.code)
+            surge = (watch["candidate_count"] >= SURGE_CANDIDATE_THRESHOLD
+                     if watch["candidate_count"] is not None
+                     else (watch["order_budget_cents"] or 0) >= SURGE_ORDER_BUDGET_CENTS)
+            allocation = ("重仓（建议20%）" if surge
+                          else "轻仓（建议7.5%）")
+            alert(self.db, key, "real_buy", "action", "买入",
+                  f"提醒价 {yuan(watch['buy_limit_cents'])} 元；{allocation}",
+                  quote.code, reference_price_cents=watch["buy_limit_cents"],
+                  action_kind="buy")
 
     def _entry_quote(self, quote: Quote) -> None:
         day = quote.source_time.date().isoformat()
@@ -550,8 +558,9 @@ class Engine:
 
     def _actual_sell_signal(self, quote: Quote) -> None:
         rows = self.db.execute("""
-            SELECT * FROM actual_positions
-            WHERE code=? AND status='open' AND watch_id IS NOT NULL
+            SELECT * FROM real_positions
+            WHERE code=? AND status='open' AND management_mode='system'
+              AND watch_id IS NOT NULL
         """, (quote.code,)).fetchall()
         for pos in rows:
             with transaction(self.db):
@@ -584,12 +593,17 @@ class Engine:
                 if pos["partial_done"]:
                     trail = trailing_cents(pos["entry_price_cents"], peak, trail)
                 self.db.execute("""
-                    UPDATE actual_positions SET prior_peak_cents=?,peak_asof_date=?,
+                    UPDATE real_positions SET prior_peak_cents=?,peak_asof_date=?,
                       trailing_line_cents=? WHERE id=?
                 """, (peak, asof.isoformat(), trail, pos["id"]))
+                if self.db.execute("""
+                    SELECT 1 FROM alerts WHERE real_position_id=? AND kind='actual_sell'
+                      AND action_status='pending'
+                """, (pos["id"],)).fetchone():
+                    continue
                 decision = virtual_exit(
                     entry_cents=pos["entry_price_cents"],
-                    remaining=pos["remaining_shares"],
+                    remaining=100 if pos["partial_done"] else 200,
                     target=pos["target_pct"],
                     initial_stop=pos["initial_stop_cents"],
                     trailing_line=trail, partial_done=bool(pos["partial_done"]),
@@ -599,14 +613,16 @@ class Engine:
                 )
                 if decision is None:
                     continue
-                key = f"actual_sell:{pos['id']}:{quote.source_time.date()}:{decision.kind}"
+                key = f"real_sell:{pos['id']}:{quote.source_time.date()}:{decision.kind}"
                 append_event(self.db, key, "actual_sell_signal", quote.code,
-                             pos["watch_id"], None,
-                             {"reason": decision.kind, "shares": decision.shares,
+                             pos["watch_id"], pos["id"],
+                             {"reason": decision.kind,
+                              "reference_price_cents": decision.proxy_price_cents,
                               "quote_time": quote.source_time.isoformat()})
-                alert(self.db, key, "actual_sell", "action", "实际持仓卖出条件已触发",
-                      f"{decision.kind}；建议核对 {decision.shares} 股，实际成交需手工录入",
-                      quote.code)
+                alert(self.db, key, "actual_sell", "action", "卖出",
+                      f"{'首次止盈，卖出约半仓' if decision.kind == 'partial_profit' else '清仓，卖出剩余持仓'}；记录价 {yuan(decision.proxy_price_cents)} 元",
+                      quote.code, reference_price_cents=decision.proxy_price_cents,
+                      real_position_id=pos["id"], action_kind=decision.kind)
 
     def end_day(self, today: date) -> dict:
         with transaction(self.db):

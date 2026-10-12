@@ -5,6 +5,7 @@ from pathlib import Path
 
 import duckdb
 import pytest
+from fastapi.testclient import TestClient
 
 from assistant.config import Config, SHANGHAI, UTC
 from assistant.engine import Engine
@@ -14,6 +15,7 @@ from assistant.quotes import Quote
 from assistant.storage import connect, init_db
 from assistant.strategy import (buy_limit_cents, intraday_profit_crossed,
                                 partial_shares, strict_crossing)
+from assistant.web import create_app
 
 
 def weekdays(start: date, count: int) -> list[date]:
@@ -141,6 +143,28 @@ def test_surge_budget_uses_full_candidate_count(app_parts, monkeypatch,
         assert all(row["reserved_cents"] == expected_budget for row in watches)
 
 
+@pytest.mark.parametrize("candidate_count,budget,allocation", [
+    (49, 7_500_000, "轻仓（建议7.5%）"),
+    (50, 20_000_000, "重仓（建议20%）"),
+    (None, 20_000_000, "重仓（建议20%）"),
+])
+def test_real_buy_alert_shows_candidate_based_allocation(app_parts, candidate_count, budget, allocation):
+    engine, _, state_path, _, entry_day, _, _ = app_parts
+    engine.preopen(entry_day, sync=False)
+    with connect(state_path) as db:
+        watch = db.execute("SELECT * FROM watchlist ORDER BY rank LIMIT 1").fetchone()
+        code, limit = watch["code"], watch["buy_limit_cents"]
+        db.execute("UPDATE watchlist SET candidate_count=?,order_budget_cents=? WHERE id=?",
+                   (candidate_count, budget, watch["id"]))
+    engine.process_quote(quote(code, entry_day, limit - 1, limit + 1, 879),
+                         allow_triggers=True)
+    with connect(state_path) as db:
+        alert = db.execute("SELECT title,body FROM alerts WHERE kind='real_buy' AND code=?",
+                           (code,)).fetchone()
+        assert alert["title"] == "买入"
+        assert allocation in alert["body"]
+
+
 def test_signal_rank_uses_liquidity_then_nearest_five_day_decline(app_parts):
     _, market, _, signal_day, _, _, _ = app_parts
     five_sessions_prior = weekdays(date(2026, 1, 5), 66)[-9]
@@ -240,6 +264,49 @@ def test_virtual_fill_ignores_opposing_order_book(app_parts):
         assert db.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 1
 
 
+def test_virtual_action_history_pages_each_fill(app_parts):
+    engine, market, _, _, entry_day, exit_day, _ = app_parts
+    engine.preopen(entry_day, sync=False)
+    watch = engine.db.execute("SELECT * FROM watchlist ORDER BY rank LIMIT 1").fetchone()
+    code, limit = watch["code"], watch["buy_limit_cents"]
+    engine.process_quote(quote(code, entry_day, limit - 1, limit + 1, 879),
+                         allow_triggers=True)
+    add_bar(market, code, entry_day, 8.4, 8.5)
+    engine.process_quote(quote(code, exit_day, 940, 930, 840),
+                         allow_triggers=True)
+    client = TestClient(create_app(engine.config))
+    first = client.get("/api/virtual/actions?page_size=1").json()
+    second = client.get("/api/virtual/actions?page=2&page_size=1").json()
+    assert first["total"] == 2 and first["pages"] == 2
+    assert [first["actions"][0]["side"], second["actions"][0]["side"]] == ["sell", "buy"]
+    assert all(page["actions"][0]["code"] == code for page in (first, second))
+    assert first["actions"][0]["reason"] == "partial_profit"
+    assert client.get("/api/virtual/actions?page=3&page_size=1").json()["page"] == 2
+    assert client.get("/api/virtual/actions?page=0").status_code == 400
+    assert client.get("/api/virtual/actions?page_size=101").status_code == 400
+
+
+def test_virtual_total_assets_include_marked_holdings(app_parts):
+    engine, _, state_path, _, entry_day, _, _ = app_parts
+    engine.preopen(entry_day, sync=False)
+    watch = engine.db.execute("SELECT * FROM watchlist ORDER BY rank LIMIT 1").fetchone()
+    code, limit = watch["code"], watch["buy_limit_cents"]
+    engine.process_quote(quote(code, entry_day, limit - 1, limit + 1, 879),
+                         allow_triggers=True)
+    client = TestClient(create_app(engine.config))
+    valued = client.get("/api/virtual").json()
+    shares = valued["positions"][0]["remaining_shares"]
+    assert valued["positions_market_value_cents"] == shares * (limit - 1)
+    assert valued["total_asset_cents"] == valued["cash_cents"] + shares * (limit - 1)
+    assert valued["valuation_fallback_codes"] == []
+    with connect(state_path) as db:
+        db.execute("DELETE FROM quotes WHERE code=?", (code,))
+    estimated = client.get("/api/virtual").json()
+    assert estimated["positions_market_value_cents"] == shares * limit
+    assert estimated["total_asset_cents"] == estimated["cash_cents"] + shares * limit
+    assert estimated["valuation_fallback_codes"] == [code]
+
+
 def test_virtual_partial_sale_ignores_opposing_order_book(app_parts):
     engine, market, state_path, _, entry_day, exit_day, _ = app_parts
     engine.preopen(entry_day, sync=False)
@@ -271,12 +338,12 @@ def test_real_sale_alert_does_not_depend_on_bid_depth(app_parts):
         watch = db.execute("SELECT * FROM watchlist ORDER BY rank LIMIT 1").fetchone()
         code = watch["code"]
         db.execute("""
-            INSERT INTO actual_positions(
-              code,watch_id,entry_date,entry_price_cents,bought_shares,
-              remaining_shares,target_pct,initial_stop_cents,prior_peak_cents,
+            INSERT INTO real_positions(
+              code,watch_id,entry_date,entry_price_cents,
+              target_pct,initial_stop_cents,prior_peak_cents,
               peak_asof_date,created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
-        """, (code, watch["id"], entry_day.isoformat(), 843, 1000, 1000,
+            ) VALUES(?,?,?,?,?,?,?,?,?)
+        """, (code, watch["id"], entry_day.isoformat(), 843,
               watch["target_pct"], 800, 843, entry_day.isoformat(),
               datetime.now().isoformat()))
     add_bar(market, code, entry_day, 8.4, 8.5)
@@ -284,9 +351,15 @@ def test_real_sale_alert_does_not_depend_on_bid_depth(app_parts):
     engine.process_quote(Quote(**{**signal.__dict__, "bid_cents": 0,
                                   "bid_volume": 0}), allow_triggers=True)
     with connect(state_path) as db:
-        assert db.execute(
-            "SELECT COUNT(*) FROM alerts WHERE kind='actual_sell'"
-        ).fetchone()[0] == 1
+        sell = db.execute("SELECT * FROM alerts WHERE kind='actual_sell'").fetchone()
+        assert sell["reference_price_cents"] == 928
+        assert sell["action_status"] == "pending"
+        assert sell["action_kind"] == "partial_profit"
+    client = TestClient(create_app(engine.config))
+    assert client.post(f"/api/real/alerts/{sell['id']}/skip").status_code == 200
+    with connect(state_path) as db:
+        assert db.execute("SELECT management_mode FROM real_positions").fetchone()[0] == "user_managed"
+    assert code not in engine.monitored_codes(exit_day)
 
 
 def test_extra_candidates_are_not_published_or_monitored(app_parts, monkeypatch):

@@ -17,6 +17,11 @@ from .storage import connect, init_db, set_status, transaction
 LOG = logging.getLogger(__name__)
 
 
+def afterclose_deadline(current: datetime) -> datetime | None:
+    cutoff = current.replace(hour=20, minute=30, second=0, microsecond=0)
+    return cutoff if current < cutoff else None
+
+
 @contextmanager
 def singleton(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -149,8 +154,7 @@ def run_worker(config: Config, *, once: bool = False) -> None:
                                 last_afterclose_attempt = time.monotonic()
                                 try:
                                     target = today
-                                    deadline = current.replace(hour=20, minute=30, second=0,
-                                                               microsecond=0)
+                                    deadline = afterclose_deadline(current)
                                     daily = market.sync_daily(target, deadline)
                                     st = market.sync_st_and_classify(target, deadline)
                                     gaps = market.reconcile_missing(target, deadline)

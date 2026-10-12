@@ -16,13 +16,23 @@ from .config import Config, SHANGHAI, now_utc_iso
 from .money import cents
 from .storage import (alert, append_event, available_budget, cash_balance,
                       connect, next_effective_calendar_date, setting_for, transaction)
-from .strategy import initial_stop_cents, stop_distance
+from .strategy import first_target_cents, initial_stop_cents, stop_distance
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _rows(db, sql: str, params: tuple = ()) -> list[dict]:
     return [dict(row) for row in db.execute(sql, params).fetchall()]
+
+
+def _event_cursor(db, after: int, last_event_id: str | None,
+                  explicit_after: bool) -> int:
+    if last_event_id and last_event_id.isdigit():
+        return max(after, int(last_event_id))
+    if explicit_after:
+        return after
+    # The initial page load already fetches current state. Only stream new changes.
+    return db.execute("SELECT COALESCE(MAX(seq),0) FROM events").fetchone()[0]
 
 
 def _write_guard(request: Request) -> None:
@@ -33,18 +43,6 @@ def _write_guard(request: Request) -> None:
             raise HTTPException(403, "Cross-origin write refused")
     if request.headers.get("sec-fetch-site") == "cross-site":
         raise HTTPException(403, "Cross-site write refused")
-
-
-class ActualFillIn(BaseModel):
-    side: str
-    code: str | None = None
-    watch_id: int | None = None
-    position_id: int | None = None
-    shares: int = Field(gt=0)
-    price: Decimal = Field(gt=0)
-    fee: Decimal = Field(default=Decimal("0"), ge=0)
-    happened_at: datetime
-    idempotency_key: str = Field(min_length=8, max_length=120)
 
 
 class SettingsIn(BaseModel):
@@ -162,18 +160,32 @@ def create_app(config: Config) -> FastAPI:
         day = datetime.now(SHANGHAI).date().isoformat()
         with connect(config.state_db) as db:
             setting = setting_for(db, day)
+            positions = _rows(db, """
+                SELECT * FROM positions WHERE status='open' ORDER BY entry_date,id
+            """)
+            quotes = {row["code"]: row["last_cents"] for row in _rows(db, """
+                SELECT q.code,q.last_cents FROM quotes AS q
+                WHERE q.code IN (SELECT code FROM positions WHERE status='open')
+            """) if row["last_cents"] > 0}
+            unquoted = [position["code"] for position in positions
+                        if position["code"] not in quotes]
+            market_value = sum(position["remaining_shares"] *
+                               quotes.get(position["code"], position["entry_price_cents"])
+                               for position in positions)
+            cash = cash_balance(db, day)
             return {
                 "date": day,
                 "capital_cents": setting["capital_cents"],
                 "available_budget_cents": available_budget(db, day),
-                "cash_cents": cash_balance(db, day),
+                "cash_cents": cash,
+                "positions_market_value_cents": market_value,
+                "total_asset_cents": cash + market_value,
+                "valuation_fallback_codes": unquoted,
                 "settings": setting,
                 "watchlist": _rows(db, """
                     SELECT * FROM watchlist WHERE entry_date=? ORDER BY rank
                 """, (day,)),
-                "positions": _rows(db, """
-                    SELECT * FROM positions WHERE status='open' ORDER BY entry_date,id
-                """),
+                "positions": positions,
                 "alerts": _rows(db, """
                     SELECT * FROM alerts
                     WHERE kind IN ('virtual_buy','virtual_sell','opportunity_only',
@@ -189,29 +201,41 @@ def create_app(config: Config) -> FastAPI:
     def real_board():
         day = datetime.now(SHANGHAI).date().isoformat()
         with connect(config.state_db) as db:
+            positions = _rows(db, """
+                SELECT * FROM real_positions WHERE status='open'
+                ORDER BY entry_date,id
+            """)
+            for position in positions:
+                position["first_target_cents"] = (
+                    first_target_cents(position["entry_price_cents"], position["target_pct"])
+                    if position["target_pct"] is not None else None
+                )
             return {
                 "date": day,
                 "watchlist": _rows(db, """
                     SELECT w.id,w.entry_date,w.signal_date,w.code,w.rank,
                       w.ret5,w.ret20,w.buy_limit_cents,w.target_pct,
-                      w.planned_shares,
+                      w.planned_shares,w.candidate_count,w.status AS watch_status,
                       COALESCE(w.order_budget_cents,s.budget_cents) AS order_budget_cents,
-                      e.at AS buy_signal_at
+                      e.at AS buy_signal_at,a.action_status AS buy_action_status
                     FROM watchlist AS w JOIN settings AS s ON s.id=w.settings_id
                     LEFT JOIN events AS e
                       ON e.event_key='real_buy:' || w.entry_date || ':' || w.code
+                    LEFT JOIN alerts AS a ON a.event_key=e.event_key
                     WHERE w.entry_date=? ORDER BY w.rank
                 """, (day,)),
-                "positions": _rows(db, """
-                    SELECT * FROM actual_positions WHERE status='open'
-                    ORDER BY entry_date,id
-                """),
+                "positions": positions,
                 "alerts": _rows(db, """
                     SELECT * FROM alerts
-                    WHERE kind IN ('real_buy','actual_sell')
-                       OR event_key LIKE 'actual_%'
-                    ORDER BY id DESC LIMIT 100
-                """),
+                    WHERE (kind='real_buy' AND action_status='pending'
+                           AND substr(event_key,10,10)=?)
+                       OR (kind='actual_sell' AND action_status='pending')
+                       OR (event_key LIKE 'actual_%'
+                           AND kind NOT IN ('real_buy','actual_sell')
+                           AND read_at IS NULL)
+                    ORDER BY CASE WHEN kind IN ('real_buy','actual_sell')
+                                  THEN 0 ELSE 1 END,id DESC LIMIT 100
+                """, (day,)),
             }
 
     @app.get("/api/quotes")
@@ -235,21 +259,10 @@ def create_app(config: Config) -> FastAPI:
         if status not in ("open", "closed", "all"):
             raise HTTPException(400, "Invalid status")
         with connect(config.state_db) as db:
-            sql = "SELECT * FROM actual_positions"
+            sql = "SELECT * FROM real_positions"
             if status != "all":
                 return _rows(db, sql + " WHERE status=? ORDER BY id DESC", (status,))
             return _rows(db, sql + " ORDER BY id DESC")
-
-    @app.get("/api/positions/actual/{position_id}/fills")
-    def actual_position_fills(position_id: int):
-        with connect(config.state_db) as db:
-            if not db.execute("SELECT 1 FROM actual_positions WHERE id=?",
-                              (position_id,)).fetchone():
-                raise HTTPException(404, "Actual position not found")
-            return _rows(db, """
-                SELECT * FROM actual_fills WHERE position_id=?
-                ORDER BY happened_at,id
-            """, (position_id,))
 
     @app.get("/api/alerts")
     def alerts(limit: int = 100):
@@ -266,6 +279,103 @@ def create_app(config: Config) -> FastAPI:
             if not db.execute("SELECT 1 FROM alerts WHERE id=?", (alert_id,)).fetchone():
                 raise HTTPException(404, "Alert not found")
         return {"ok": True}
+
+    def handle_real_alert(alert_id: int, choice: str, request: Request):
+        _write_guard(request)
+        with connect(config.state_db) as db, transaction(db):
+            item = db.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
+            if item is None or item["kind"] not in ("real_buy", "actual_sell"):
+                raise HTTPException(404, "Real trading alert not found")
+            if item["action_status"] == choice:
+                return {"ok": True, "duplicate": True,
+                        "position_id": item["real_position_id"]}
+            if item["action_status"] != "pending" or not item["reference_price_cents"]:
+                raise HTTPException(409, "This alert is no longer actionable")
+            position_id = item["real_position_id"]
+            if item["kind"] == "real_buy":
+                event = db.execute("SELECT watch_id FROM events WHERE event_key=?",
+                                   (item["event_key"],)).fetchone()
+                watch = db.execute("SELECT * FROM watchlist WHERE id=?",
+                                   (event["watch_id"],)).fetchone() if event else None
+                if watch is None or watch["code"] != item["code"]:
+                    raise HTTPException(409, "Buy alert has no matching plan")
+                if watch["entry_date"] != datetime.now(SHANGHAI).date().isoformat():
+                    raise HTTPException(409, "Buy alert expired after its trading day")
+                if choice == "completed":
+                    if db.execute("SELECT 1 FROM real_positions WHERE code=? AND status='open'",
+                                  (item["code"],)).fetchone():
+                        raise HTTPException(409, "This stock already has an open real position")
+                    entry = item["reference_price_cents"]
+                    distance = stop_distance(watch["atr14"], watch["q_close"],
+                                             entry, watch["raw_close"])
+                    stop = initial_stop_cents(entry, distance)
+                    db.execute("""
+                        INSERT INTO real_positions(
+                          code,watch_id,entry_date,entry_price_cents,target_pct,
+                          initial_stop_cents,prior_peak_cents,peak_asof_date,created_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?)
+                    """, (item["code"], watch["id"], watch["entry_date"], entry,
+                          watch["target_pct"], stop, entry, watch["entry_date"],
+                          now_utc_iso()))
+                    position_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+            else:
+                pos = db.execute("""
+                    SELECT * FROM real_positions WHERE id=? AND status='open'
+                      AND management_mode='system'
+                """, (position_id,)).fetchone()
+                if pos is None:
+                    raise HTTPException(409, "Managed real position is no longer open")
+                if choice == "skipped":
+                    db.execute("UPDATE real_positions SET management_mode='user_managed' WHERE id=?",
+                               (position_id,))
+                elif item["action_kind"] == "partial_profit":
+                    if pos["partial_done"]:
+                        raise HTTPException(409, "First profit sale was already confirmed")
+                    db.execute("UPDATE real_positions SET partial_done=1 WHERE id=?",
+                               (position_id,))
+                elif item["action_kind"] in ("stop", "expiry"):
+                    db.execute("""
+                        UPDATE real_positions SET status='closed',closed_at=? WHERE id=?
+                    """, (now_utc_iso(), position_id))
+                else:
+                    raise HTTPException(409, "Unknown sell action")
+            acted_at = now_utc_iso()
+            db.execute("""
+                UPDATE alerts SET action_status=?,acted_at=?,read_at=COALESCE(read_at,?),
+                  real_position_id=? WHERE id=?
+            """, (choice, acted_at, acted_at, position_id, alert_id))
+            append_event(db, f"real_action:{alert_id}", "real_alert_action", item["code"],
+                         watch["id"] if item["kind"] == "real_buy" else pos["watch_id"],
+                         position_id, {"choice": choice, "alert_id": alert_id,
+                                       "reference_price_cents": item["reference_price_cents"],
+                                       "action_kind": item["action_kind"]})
+            return {"ok": True, "duplicate": False, "position_id": position_id}
+
+    @app.post("/api/real/alerts/{alert_id}/complete")
+    def complete_real_alert(alert_id: int, request: Request):
+        return handle_real_alert(alert_id, "completed", request)
+
+    @app.post("/api/real/alerts/{alert_id}/skip")
+    def skip_real_alert(alert_id: int, request: Request):
+        return handle_real_alert(alert_id, "skipped", request)
+
+    @app.post("/api/real/positions/{position_id}/finish-manual")
+    def finish_manual_real_position(position_id: int, request: Request):
+        _write_guard(request)
+        with connect(config.state_db) as db, transaction(db):
+            pos = db.execute("SELECT * FROM real_positions WHERE id=?",
+                             (position_id,)).fetchone()
+            if pos is None:
+                raise HTTPException(404, "Real position not found")
+            if pos["management_mode"] != "user_managed":
+                raise HTTPException(409, "Only user-managed positions can be finished here")
+            if pos["status"] == "closed":
+                return {"ok": True, "duplicate": True}
+            db.execute("UPDATE real_positions SET status='closed',closed_at=? WHERE id=?",
+                       (now_utc_iso(), position_id))
+            append_event(db, f"real_manual_finish:{position_id}", "real_manual_finish",
+                         pos["code"], pos["watch_id"], position_id, {})
+        return {"ok": True, "duplicate": False}
 
     @app.get("/api/trades/{trade_id}/events")
     def trade_events(trade_id: int):
@@ -290,22 +400,6 @@ def create_app(config: Config) -> FastAPI:
             opportunities = db.execute(
                 "SELECT COUNT(*) FROM watchlist WHERE status='opportunity_only'"
             ).fetchone()[0]
-            actual_closed = db.execute("""
-                SELECT COALESCE(SUM(
-                  CASE WHEN f.side='sell' THEN f.shares*f.price_cents-f.fee_cents
-                       ELSE -f.shares*f.price_cents-f.fee_cents END),0)
-                FROM actual_fills f JOIN actual_positions p ON p.id=f.position_id
-                WHERE p.status='closed'
-            """).fetchone()[0]
-            actual_trades = _rows(db, """
-                SELECT p.id,p.code,p.entry_date,p.closed_at,p.bought_shares,
-                  SUM(CASE WHEN f.side='sell' THEN f.shares*f.price_cents-f.fee_cents
-                           ELSE -f.shares*f.price_cents-f.fee_cents END) AS net_pnl_cents
-                FROM actual_positions p JOIN actual_fills f ON f.position_id=p.id
-                WHERE p.status='closed'
-                GROUP BY p.id,p.code,p.entry_date,p.closed_at,p.bought_shares
-                ORDER BY p.id DESC LIMIT 100
-            """)
             return {"virtual_closed_trades": len(closed),
                     "virtual_wins": wins,
                     "virtual_win_rate": wins / len(closed) if closed else None,
@@ -313,10 +407,7 @@ def create_app(config: Config) -> FastAPI:
                     "virtual_cash_cents": cash_balance(db, day),
                     "virtual_available_budget_cents": available_budget(db, day),
                     "opportunities_without_virtual_entry": opportunities,
-                    "actual_closed_realized_pnl_cents": actual_closed,
-                    "actual_account_equity": None,
-                    "virtual_trades": list(reversed(closed))[-100:][::-1],
-                    "actual_trades": actual_trades}
+                    "virtual_trades": list(reversed(closed))[-100:][::-1]}
 
     @app.get("/api/virtual/report")
     def virtual_report():
@@ -324,11 +415,56 @@ def create_app(config: Config) -> FastAPI:
         return {key: value for key, value in report.items()
                 if key.startswith("virtual_") or key == "opportunities_without_virtual_entry"}
 
+    @app.get("/api/virtual/actions")
+    def virtual_actions(page: int = 1, page_size: int = 20):
+        if page < 1 or not 1 <= page_size <= 100:
+            raise HTTPException(400, "Invalid history page or page size")
+        with connect(config.state_db) as db:
+            total = db.execute("SELECT COUNT(*) FROM virtual_legs").fetchone()[0]
+            pages = max(1, (total + page_size - 1) // page_size)
+            page = min(page, pages)
+            actions = _rows(db, """
+                SELECT l.id,l.position_id,p.code,l.at,l.side,l.shares,
+                       l.gross_price_cents,l.fee_cents,l.cash_delta_cents,l.reason
+                FROM virtual_legs AS l JOIN positions AS p ON p.id=l.position_id
+                ORDER BY l.at DESC,l.id DESC LIMIT ? OFFSET ?
+            """, (page_size, (page - 1) * page_size))
+            return {"actions": actions, "total": total, "page": page,
+                    "page_size": page_size, "pages": pages}
+
     @app.get("/api/real/report")
-    def real_report():
-        report = reports()
-        return {key: value for key, value in report.items()
-                if key.startswith("actual_")}
+    def real_report(page: int = 1, page_size: int = 20):
+        if page < 1 or not 1 <= page_size <= 100:
+            raise HTTPException(400, "Invalid history page or page size")
+        with connect(config.state_db) as db:
+            total = db.execute("""
+                SELECT
+                  (SELECT COUNT(*) FROM alerts
+                   WHERE kind IN ('real_buy','actual_sell')
+                     AND action_status IN ('completed','skipped'))
+                  + (SELECT COUNT(*) FROM events WHERE kind='real_manual_finish')
+            """).fetchone()[0]
+            pages = max(1, (total + page_size - 1) // page_size)
+            page = min(page, pages)
+            actions = _rows(db, """
+                SELECT id,kind,code,title,body,created_at,acted_at,action_status,
+                       reference_price_cents,real_position_id,action_kind
+                FROM (
+                    SELECT id,kind,code,title,body,created_at,acted_at,
+                           action_status,reference_price_cents,real_position_id,
+                           action_kind
+                    FROM alerts WHERE kind IN ('real_buy','actual_sell')
+                      AND action_status IN ('completed','skipped')
+                    UNION ALL
+                    SELECT seq AS id,kind,code,'自行清仓' AS title,'' AS body,
+                           at AS created_at,at AS acted_at,'completed' AS action_status,
+                           NULL AS reference_price_cents,position_id AS real_position_id,
+                           'manual_finish' AS action_kind
+                    FROM events WHERE kind='real_manual_finish'
+                ) ORDER BY acted_at DESC,id DESC LIMIT ? OFFSET ?
+            """, (page_size, (page - 1) * page_size))
+            return {"actions": actions, "total": total, "page": page,
+                    "page_size": page_size, "pages": pages}
 
     @app.get("/api/settings")
     def settings():
@@ -359,111 +495,23 @@ def create_app(config: Config) -> FastAPI:
                                       "budget_cents": cents(data.budget)})
         return {"effective_date": effective}
 
-    @app.post("/api/actual-fills")
-    def actual_fill(data: ActualFillIn, request: Request):
-        _write_guard(request)
-        if data.side not in ("buy", "sell"):
-            raise HTTPException(400, "Side must be buy or sell")
-        if data.happened_at.tzinfo is None or data.happened_at.utcoffset() is None:
-            raise HTTPException(400, "Happened_at must include a time zone")
-        happened = data.happened_at.astimezone(SHANGHAI)
-        price_cents = cents(data.price)
-        fee_cents = cents(data.fee)
-        if price_cents <= 0:
-            raise HTTPException(400, "Price is too small")
-        with connect(config.state_db) as db, transaction(db):
-            existing = db.execute(
-                "SELECT position_id FROM actual_fills WHERE idempotency_key=?",
-                (data.idempotency_key,),
-            ).fetchone()
-            if existing:
-                return {"position_id": existing["position_id"], "duplicate": True}
-            if data.side == "buy":
-                if not data.code or data.shares % 100 != 0:
-                    raise HTTPException(400, "Buy requires code and 100-share lots")
-                if not data.code.startswith(("sh.", "sz.")) or len(data.code) != 9:
-                    raise HTTPException(400, "Invalid code")
-                watch = None
-                target = stop = None
-                linked_watch_id = data.watch_id
-                if linked_watch_id is None:
-                    match = db.execute("""
-                        SELECT id FROM watchlist WHERE code=? AND entry_date=?
-                    """, (data.code, happened.date().isoformat())).fetchone()
-                    linked_watch_id = match["id"] if match else None
-                if linked_watch_id is not None:
-                    watch = db.execute(
-                        "SELECT * FROM watchlist WHERE id=? AND code=?",
-                        (linked_watch_id, data.code),
-                    ).fetchone()
-                    if watch is None:
-                        raise HTTPException(400, "Watchlist record does not match code")
-                    if watch["entry_date"] != happened.date().isoformat():
-                        raise HTTPException(400, "Watchlist record is for another trading day")
-                    target = watch["target_pct"]
-                    distance = stop_distance(watch["atr14"], watch["q_close"],
-                                             price_cents, watch["raw_close"])
-                    stop = initial_stop_cents(price_cents, distance)
-                db.execute("""
-                    INSERT INTO actual_positions(
-                      code,watch_id,entry_date,entry_price_cents,bought_shares,
-                      remaining_shares,target_pct,initial_stop_cents,prior_peak_cents,
-                      peak_asof_date,created_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
-                """, (data.code, linked_watch_id, happened.date().isoformat(),
-                      price_cents, data.shares, data.shares, target, stop,
-                      price_cents, happened.date().isoformat(), now_utc_iso()))
-                position_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
-            else:
-                if data.position_id is None:
-                    raise HTTPException(400, "Sell requires position_id")
-                pos = db.execute(
-                    "SELECT * FROM actual_positions WHERE id=? AND status='open'",
-                    (data.position_id,),
-                ).fetchone()
-                if pos is None:
-                    raise HTTPException(404, "Open actual position not found")
-                if data.shares > pos["remaining_shares"]:
-                    raise HTTPException(400, "Sell quantity exceeds remaining shares")
-                if happened.date() <= date.fromisoformat(pos["entry_date"]):
-                    raise HTTPException(400, "A-share position cannot be sold on entry date")
-                position_id = data.position_id
-                event_code = pos["code"]
-                event_watch_id = pos["watch_id"]
-                remaining = pos["remaining_shares"] - data.shares
-                db.execute("""
-                    UPDATE actual_positions SET remaining_shares=?,partial_done=?,
-                      status=?,closed_at=? WHERE id=?
-                """, (remaining, int(remaining > 0 or bool(pos["partial_done"])),
-                      "closed" if remaining == 0 else "open",
-                      happened.isoformat() if remaining == 0 else None, position_id))
-            db.execute("""
-                INSERT INTO actual_fills VALUES(NULL,?,?,?,?,?,?,?)
-            """, (position_id, data.side, data.shares, price_cents,
-                  fee_cents, happened.isoformat(), data.idempotency_key))
-            append_event(db, f"actual_fill:{data.idempotency_key}", "actual_fill",
-                         data.code if data.side == "buy" else event_code,
-                         linked_watch_id if data.side == "buy" else event_watch_id, None,
-                         {"position_id": position_id, "side": data.side,
-                          "shares": data.shares, "price_cents": price_cents,
-                          "fee_cents": fee_cents})
-        return {"position_id": position_id, "duplicate": False}
-
     @app.get("/api/events/stream")
     async def event_stream(request: Request, after: int = 0):
-        header = request.headers.get("last-event-id")
-        cursor = max(after, int(header)) if header and header.isdigit() else after
+        with connect(config.state_db) as db:
+            cursor = _event_cursor(db, after, request.headers.get("last-event-id"),
+                                   "after" in request.query_params)
 
         async def generate():
             nonlocal cursor
             while not await request.is_disconnected():
                 with connect(config.state_db) as db:
-                    rows = _rows(db, "SELECT seq,kind,code,at FROM events WHERE seq>? ORDER BY seq LIMIT 100",
-                                 (cursor,))
-                if rows:
-                    for row in rows:
-                        cursor = row["seq"]
-                        yield f"id: {cursor}\nevent: update\ndata: {json.dumps(row, ensure_ascii=False)}\n\n"
+                    row = db.execute(
+                        "SELECT seq FROM events WHERE seq>? ORDER BY seq DESC LIMIT 1",
+                        (cursor,),
+                    ).fetchone()
+                if row:
+                    cursor = row["seq"]
+                    yield f'id: {cursor}\nevent: update\ndata: {{"latest_seq":{cursor}}}\n\n'
                 else:
                     yield ": ping\n\n"
                 await asyncio.sleep(1)

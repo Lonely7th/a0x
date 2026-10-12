@@ -28,10 +28,10 @@ systemctl --version
 
 ## 第一次部署
 
-把 `trading_assistant_app` 目录作为一个 Git 仓库上传。以下地址替换成您自己的仓库地址：
+把 `trading_assistant_app` 目录作为一个 Git 仓库上传。当前仓库的拉取命令为：
 
 ```bash
-git clone https://github.com/您的账号/您的仓库.git trading_assistant_app
+git clone https://github.com/Lonely7th/a0x.git trading_assistant_app
 cd trading_assistant_app
 bash deploy/manage.sh setup
 bash deploy/manage.sh initialize
