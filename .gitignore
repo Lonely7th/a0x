@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+.venv/
+runtime/
+deploy/.env
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.duckdb
+*.duckdb.wal
+*.worker.lock
+*.pyc

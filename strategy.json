@@ -1,0 +1,96 @@
+{
+  "id": "oversold_limit_ret20_exit_switch_hold20",
+  "version_date": "2026-10-12",
+  "version": "surge_top5_200k",
+  "backtest_revision": "2026-10-12_open_partial_same_day_stop",
+  "status": "selected_research_candidate_for_manual_forward_validation",
+  "live_ready": false,
+  "execution_mode": "single_account_manual_orders",
+  "runtime_surfaces": {
+    "virtual": {
+      "initial_capital_cny": 1000000,
+      "normal_order_budget_cny": 75000,
+      "surge_order_budget_cny": 200000,
+      "commission_each_side": 0.00025,
+      "minimum_commission_cny": 5,
+      "transfer_fee_each_side": 0.00001,
+      "sell_stamp_tax": 0.0005,
+      "one_way_slippage": 0,
+      "fill_model": "after valid price trigger, assume buy and sell succeed without order-book depth checks"
+    },
+    "real": {
+      "initial_capital_cny": null,
+      "maximum_ranked_stocks_per_day": 5,
+      "focus_watchlist_enabled": false,
+      "order_entry": "manual",
+      "actual_cash_and_fills": "recorded manually"
+    }
+  },
+  "universe": {
+    "boards": ["sh_main", "sz_main", "chinext"],
+    "exclude_st_on_signal_and_entry": true,
+    "minimum_ipo_age_calendar_days": 180,
+    "minimum_valid_daily_bars": 60,
+    "minimum_signal_raw_close_cny": 3.0,
+    "minimum_20_valid_day_median_amount_cny": 100000000
+  },
+  "signal_at_close": {
+    "adjusted_return_5_valid_days_max": -0.12,
+    "atr14_over_adjusted_close_max": 0.06,
+    "daily_rank": "20-valid-day median daily trading amount descending; then ret5 closest to -12% (descending); then code ascending",
+    "maximum_orders_per_signal_day": 5,
+    "surge_candidate_count_threshold": 50,
+    "surge_count_basis": "all eligible signal-day candidates before top-five ranking"
+  },
+  "entry_next_market_day": {
+    "buy_limit_cny": "floor(signal_raw_close * 0.96 * 100) / 100",
+    "order_validity": "entry day only",
+    "backtest_fill_scenarios": ["strict_crossing", "gap_allowed"],
+    "cancel_if_reference_price_change_exceeds": 0.02,
+    "no_new_buy_during_existing_same_stock_position": true
+  },
+  "account": {
+    "initial_capital_cny": 1000000,
+    "fixed_budget_per_order_cny": 75000,
+    "budget_fraction_of_initial_capital": 0.075,
+    "surge_fixed_budget_per_order_cny": 200000,
+    "surge_budget_fraction_of_initial_capital": 0.20,
+    "surge_budget_applies_to": "top five orders only when candidate count is at least 50",
+    "force_liquidation_for_surge": false,
+    "budget_tracks_current_equity": false,
+    "topup_budget_cny": 0,
+    "borrow_allowed": false,
+    "purchase_lot_shares": 100,
+    "partial_sale_cash_reusable_after_full_exit": true
+  },
+  "exit": {
+    "first_partial_target": {
+      "feature": "signal_adjusted_close / adjusted_close_20_valid_sessions_earlier - 1",
+      "threshold_at_or_below": -0.10,
+      "target_if_true": 0.10,
+      "target_if_false": 0.01,
+      "reference": "gross_simulated_entry_price",
+      "fraction_to_sell": 0.5,
+      "only_after_entry_day": true
+    },
+    "initial_stop_distance": "clip(1.5 * signal_ATR14 / gross_entry_price, 0.02, 0.08)",
+    "trailing_after_first_sale": {
+      "prior_peak_drawdown": 0.08,
+      "gross_entry_floor": true,
+      "line_only_moves_up": true
+    },
+    "max_hold_following_market_sessions": 20,
+    "expiry_action": "attempt full sale at opening on following market session 20; retry if blocked",
+    "same_day_stop_profit_ambiguity": "stop_first"
+  },
+  "backtest_cost_assumptions": {
+    "commission_each_side": 0.0003,
+    "minimum_commission_cny_each_order": 5,
+    "transfer_fee_each_side": 0.00001,
+    "sell_stamp_tax": 0.0005,
+    "one_way_slippage_scenarios": [0, 0.001, 0.003]
+  },
+  "source_backtest": "same_day_partial_recalc/results.csv and same_day_partial_recalc/RECALC_REPORT.md; high_signal_capacity retained as pre-correction archive",
+  "complete_scheme": "CURRENT_STRATEGY.md",
+  "independent_out_of_sample_verified": false
+}

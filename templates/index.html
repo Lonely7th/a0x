@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>A0x</title>
+  <link rel="icon" type="image/png" href="/static/a0x-icon.png">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><img class="brand-icon" src="/static/a0x-icon.png" alt=""><div><strong>A0x</strong><small>OPENAI-A</small></div></div>
+    <div class="header-status"><span id="worker-badge" class="badge neutral">后台检测中</span><span id="mode-badge" class="badge {% if observe_only %}warn{% else %}good{% endif %}">{% if observe_only %}观察模式{% else %}买卖提醒已启用{% endif %}</span><span id="clock"></span></div>
+  </header>
+  <main class="layout">
+    <aside class="sidebar">
+      <button class="nav active" data-view="overview">今日总览</button>
+      <button class="nav" data-view="watch">盘中监听</button>
+      <button class="nav" data-view="positions">虚拟持仓</button>
+      <button class="nav" data-view="actual">实际成交</button>
+      <button class="nav" data-view="alerts">提醒与日志</button>
+      <button class="nav" data-view="reports">复盘报告</button>
+      <button class="nav" data-view="quality">行情验收</button>
+      <button class="nav" data-view="settings">运行设置</button>
+      <div class="sidebar-note">行情触价是系统信号，券商订单与实际成交仍需人工确认。</div>
+    </aside>
+    <div class="content">
+      <section id="view-overview" class="view active">
+        <div class="page-heading"><div><p class="eyebrow">TRADING DESK / DAILY VIEW</p><h1>今日总览</h1><p id="today-caption" class="muted">正在载入交易日状态…</p></div><button id="refresh-button" class="secondary">刷新数据 ↗</button></div>
+        <div id="critical-banner" class="critical hidden"></div>
+        <div class="metrics">
+          <article class="metric"><span>策略分配本金</span><strong id="capital">—</strong></article>
+          <article class="metric"><span>虚拟可部署预算</span><strong id="budget-available">—</strong></article>
+          <article class="metric"><span>虚拟账面现金</span><strong id="cash">—</strong></article>
+          <article class="metric"><span>今日监听股票</span><strong id="watch-count">—</strong></article>
+        </div>
+        <div class="grid-two">
+          <article class="panel"><div class="panel-head"><h2>近期提醒</h2><button class="link" data-go="alerts">查看全部 →</button></div><div id="overview-alerts"></div></article>
+          <article class="panel"><div class="panel-head"><h2>数据与行情</h2></div><div id="data-health"></div></article>
+        </div>
+        <article class="panel"><div class="panel-head"><h2>今日买入候选 · 前 5 只</h2><button class="link" data-go="watch">查看全部监听 →</button></div><div id="overview-watch"></div></article>
+      </section>
+      <section id="view-watch" class="view">
+        <div class="page-heading"><div><p class="eyebrow">LIVE MONITOR / WATCHLIST</p><h1>盘中监听</h1><p class="muted">前 5 只触发买入提醒；其余符合选股条件的股票触发重点关注提醒。资金不足或已有持仓不递补。</p></div></div>
+        <div class="watch-summary"><span id="buy-candidate-count" class="summary-chip buy">买入候选 0</span><span id="focus-candidate-count" class="summary-chip focus">重点关注 0</span><span class="muted">两类股票均按严格穿越限价监听</span></div>
+        <article class="panel"><div class="panel-head"><h2>完整监听列表</h2><span id="monitor-total" class="tiny">—</span></div><div id="watch-table"></div></article>
+      </section>
+      <section id="view-positions" class="view">
+        <div class="page-heading"><div><p class="eyebrow">VIRTUAL LEDGER</p><h1>虚拟持仓</h1><p class="muted">系统代理成交，与实际券商持仓分开。</p></div></div>
+        <article class="panel"><div id="positions-table"></div></article>
+        <article class="panel"><h2>逐笔事件与现金流水</h2><div id="trade-detail" class="empty">点击持仓中的“查看日志”查看每一步操作。</div></article>
+      </section>
+      <section id="view-actual" class="view">
+        <div class="page-heading"><div><p class="eyebrow">BROKER RECORD</p><h1>实际成交录入</h1><p class="muted">只有人工确认的券商成交才计入实际账本。</p></div></div>
+        <div class="grid-two">
+          <article class="panel">
+            <h2>新增买入成交</h2>
+            <form id="actual-buy-form" class="form">
+              <label>股票代码<input name="code" placeholder="sh.600000" required></label>
+              <label>关联观察记录 ID（可留空；默认按当日股票匹配）<input name="watch_id" type="number" min="1"></label>
+              <label>成交股数<input name="shares" type="number" min="100" step="100" required></label>
+              <label>实际成交价（元）<input name="price" type="number" min="0.01" step="0.01" required></label>
+              <label>实际费用（元）<input name="fee" type="number" min="0" step="0.01" value="0"></label>
+              <label>成交时间<input name="happened_at" type="datetime-local" required></label>
+              <button type="submit" class="primary">记录买入</button>
+            </form>
+          </article>
+          <article class="panel">
+            <h2>新增卖出成交</h2>
+            <form id="actual-sell-form" class="form">
+              <label>实际持仓 ID<input name="position_id" type="number" min="1" required></label>
+              <label>成交股数<input name="shares" type="number" min="1" required></label>
+              <label>实际成交价（元）<input name="price" type="number" min="0.01" step="0.01" required></label>
+              <label>实际费用（元）<input name="fee" type="number" min="0" step="0.01" value="0"></label>
+              <label>成交时间<input name="happened_at" type="datetime-local" required></label>
+              <button type="submit" class="primary">记录卖出</button>
+            </form>
+          </article>
+        </div>
+        <article class="panel"><div class="panel-head"><h2>实际持仓</h2></div><div id="actual-table"></div></article>
+        <article class="panel"><h2>实际成交日志</h2><div id="actual-detail" class="empty">点击实际持仓中的“查看成交”。</div></article>
+        <p id="form-message" class="form-message"></p>
+      </section>
+      <section id="view-alerts" class="view">
+        <div class="page-heading"><div><p class="eyebrow">EVENT LOG</p><h1>提醒与日志</h1><p class="muted">已读只改变提醒状态，不改变交易状态。</p></div></div>
+        <article class="panel"><div id="alerts-list"></div></article>
+      </section>
+      <section id="view-reports" class="view">
+        <div class="page-heading"><div><p class="eyebrow">REVIEW</p><h1>复盘报告</h1><p class="muted">虚拟与实际净收益分别统计；机会提示不计入虚拟胜率。</p></div></div>
+        <div id="report-metrics" class="metrics"></div>
+        <article class="panel"><h2>最近完整虚拟交易</h2><div id="report-virtual-trades"></div></article>
+        <article class="panel"><h2>最近完整实际交易</h2><div id="report-actual-trades"></div></article>
+        <article class="panel"><h2>统计口径</h2><p>虚拟盈亏按完整平仓交易和已记录的佣金、过户费、印花税及模拟滑点计算。实际已平仓盈亏按手工录入的成交与费用计算；未录入的成交不会推断。实际账户总净值未知。</p></article>
+      </section>
+      <section id="view-settings" class="view">
+        <div class="page-heading"><div><p class="eyebrow">CONFIGURATION</p><h1>运行设置</h1><p class="muted">资金和费率的新版本从下一个日期起生效，已开仓交易保持原版本。</p></div></div>
+        <div class="grid-two">
+          <article class="panel"><h2>当前参数</h2><div id="settings-current"></div></article>
+          <article class="panel"><h2>新增参数版本</h2>
+            <form id="settings-form" class="form">
+              <label>策略分配本金（元）<input name="capital" type="number" min="1" step="0.01" required></label>
+              <label>普通日单笔预算（元；候选≥50只时固定为20万元）<input name="budget" type="number" min="1" step="0.01" required></label>
+              <label>单边佣金率<input name="commission_rate" type="number" min="0" step="0.000001" required></label>
+              <label>最低佣金（元）<input name="minimum_commission" type="number" min="0" step="0.01" required></label>
+              <label>单边过户费率<input name="transfer_rate" type="number" min="0" step="0.000001" required></label>
+              <label>卖出印花税率<input name="stamp_rate" type="number" min="0" step="0.000001" required></label>
+              <label>模拟单边滑点<input name="slippage_rate" type="number" min="0" step="0.000001" required></label>
+              <button type="submit" class="primary">保存下期版本</button>
+            </form>
+          </article>
+        </div>
+      </section>
+      <section id="view-quality" class="view">
+        <div class="page-heading"><div><p class="eyebrow">QUOTE QUALITY</p><h1>行情验收</h1><p class="muted">近 5 个自然日的来源覆盖与更新时间戳。使用盘中提醒时，请在交易日与券商终端抽查。</p></div></div>
+        <article class="panel"><h2>轮询覆盖</h2><div id="quality-polls"></div></article>
+        <article class="panel"><h2>有效快照</h2><div id="quality-samples"></div></article>
+      </section>
+    </div>
+  </main>
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

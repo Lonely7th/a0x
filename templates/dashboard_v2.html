@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>A0x · OPENAI-A</title>
+  <link rel="icon" type="image/png" href="/static/a0x-icon.png">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><img class="brand-icon" src="/static/a0x-icon.png" alt=""><div><strong>A0x</strong><small>OPENAI-A</small></div></div>
+    <div class="header-status"><span id="worker-badge" class="badge neutral">后台检测中</span><span id="mode-badge" class="badge neutral">模式检测中</span><span id="clock"></span></div>
+  </header>
+  <main class="layout">
+    <aside class="sidebar">
+      <button class="nav active" data-view="virtual">虚拟盘</button>
+      <button class="nav" data-view="real">实盘</button>
+      <button class="nav" data-view="system">行情与系统</button>
+      <div class="sidebar-note">两盘共用选股和买卖规则。虚拟成交用于策略跟踪，实盘以券商实际成交为准。</div>
+    </aside>
+    <div class="content">
+      <section id="view-virtual" class="view active">
+        <div class="page-heading"><div><p class="eyebrow">SIMULATED PORTFOLIO</p><h1>虚拟盘</h1><p class="muted">固定本金与资金约束；达到价格条件后按规则模拟成交，交易费用照计。</p></div><button class="secondary refresh">刷新数据 ↗</button></div>
+        <div class="metrics">
+          <article class="metric"><span>初始本金</span><strong id="v-capital">—</strong></article>
+          <article class="metric"><span>可部署预算</span><strong id="v-available">—</strong></article>
+          <article class="metric"><span>账面现金</span><strong id="v-cash">—</strong></article>
+          <article class="metric"><span>已实现净盈亏</span><strong id="v-pnl">—</strong></article>
+        </div>
+        <article class="panel"><div class="panel-head"><h2>今日前五名 · 虚拟执行</h2><span id="v-date" class="tiny">—</span></div><div id="v-watch"></div></article>
+        <article class="panel"><h2>虚拟持仓与退出线</h2><div id="v-positions"></div></article>
+        <article class="panel"><h2>虚拟盘提醒</h2><div id="v-alerts"></div></article>
+        <article class="panel"><h2>虚拟盘复盘</h2><div id="v-report"></div><div id="v-trade-detail"></div></article>
+        <article class="panel"><h2>虚拟盘参数</h2><div id="v-settings"></div>
+          <form id="settings-form" class="form">
+            <label>虚拟初始本金（元）<input name="capital" type="number" min="1" step="0.01" required></label>
+            <label>普通日单笔预算（元；候选≥50只时固定20万元）<input name="budget" type="number" min="1" step="0.01" required></label>
+            <label>单边佣金率<input name="commission_rate" type="number" min="0" step="0.000001" required></label>
+            <label>最低佣金（元）<input name="minimum_commission" type="number" min="0" step="0.01" required></label>
+            <label>单边过户费率<input name="transfer_rate" type="number" min="0" step="0.000001" required></label>
+            <label>卖出印花税率<input name="stamp_rate" type="number" min="0" step="0.000001" required></label>
+            <label>模拟单边滑点<input name="slippage_rate" type="number" min="0" step="0.000001" required></label>
+            <button class="primary" type="submit">保存下期虚拟盘参数</button>
+          </form>
+        </article>
+      </section>
+      <section id="view-real" class="view">
+        <div class="page-heading"><div><p class="eyebrow">MANUAL TRADING DESK</p><h1>实盘</h1><p class="muted">仅展示每天排名前五的交易计划；不设置账户初始金额。下单和成交确认由您在券商端完成。</p></div><button class="secondary refresh">刷新数据 ↗</button></div>
+        <div class="metrics real-metrics">
+          <article class="metric"><span>今日计划股票</span><strong id="r-count">—</strong></article>
+          <article class="metric"><span>已录入持仓</span><strong id="r-open">—</strong></article>
+          <article class="metric"><span>已录入平仓净盈亏</span><strong id="r-pnl">—</strong></article>
+        </div>
+        <article class="panel"><div class="panel-head"><h2>今日前五名 · 人工下单</h2><span id="r-date" class="tiny">—</span></div><div id="r-watch"></div></article>
+        <article class="panel"><h2>实际持仓与退出线</h2><div id="r-positions"></div></article>
+        <article class="panel"><h2>实盘买卖提醒</h2><div id="r-alerts"></div></article>
+        <div class="grid-two">
+          <article class="panel"><h2>录入实际买入</h2><form id="actual-buy-form" class="form">
+            <label>股票代码<input name="code" placeholder="sh.600000" required></label>
+            <label>观察记录 ID（可留空，默认按当日匹配）<input name="watch_id" type="number" min="1"></label>
+            <label>成交股数<input name="shares" type="number" min="100" step="100" required></label>
+            <label>成交价（元）<input name="price" type="number" min="0.01" step="0.01" required></label>
+            <label>费用（元）<input name="fee" type="number" min="0" step="0.01" value="0"></label>
+            <label>成交时间<input name="happened_at" type="datetime-local" required></label>
+            <button class="primary" type="submit">记录实际买入</button>
+          </form></article>
+          <article class="panel"><h2>录入实际卖出</h2><form id="actual-sell-form" class="form">
+            <label>实际持仓 ID<input name="position_id" type="number" min="1" required></label>
+            <label>成交股数<input name="shares" type="number" min="1" required></label>
+            <label>成交价（元）<input name="price" type="number" min="0.01" step="0.01" required></label>
+            <label>费用（元）<input name="fee" type="number" min="0" step="0.01" value="0"></label>
+            <label>成交时间<input name="happened_at" type="datetime-local" required></label>
+            <button class="primary" type="submit">记录实际卖出</button>
+          </form></article>
+        </div>
+        <p id="form-message" class="form-message"></p>
+        <article class="panel"><h2>实际成交与平仓记录</h2><div id="r-report"></div><div id="r-fill-detail"></div></article>
+      </section>
+      <section id="view-system" class="view">
+        <div class="page-heading"><div><p class="eyebrow">DATA AND SERVICE</p><h1>行情与系统</h1><p class="muted">报价异常时相关股票不会触发买卖信号。</p></div><button class="secondary refresh">刷新数据 ↗</button></div>
+        <div id="critical-banner" class="critical hidden"></div>
+        <div class="grid-two"><article class="panel"><h2>服务状态</h2><div id="system-health"></div></article><article class="panel"><h2>行情覆盖</h2><div id="system-quality"></div></article></div>
+      </section>
+    </div>
+  </main>
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/dashboard_v2.js" defer></script>
+</body>
+</html>
