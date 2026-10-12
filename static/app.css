@@ -1,11 +1,11 @@
 :root{font-family:"Haas","Inter","Microsoft YaHei",system-ui,sans-serif;color:#181d26;background:#fff;font-synthesis:none}
 *{box-sizing:border-box}body{margin:0;min-height:100vh}button,input{font:inherit}button{cursor:pointer}
-.topbar{height:76px;display:flex;align-items:center;justify-content:space-between;gap:18px;padding:0 32px;border-bottom:1px solid #ddd;background:#fff}
-.brand{display:flex;align-items:center;gap:13px}.brand-icon{display:block;width:40px;height:40px;object-fit:contain;flex:none}
-.brand strong{display:block;font-size:17px;font-weight:600}.brand small{display:block;color:#666b73;font-size:11px;margin-top:3px}
+.topbar{height:62px;display:flex;align-items:center;justify-content:space-between;gap:18px;padding:0 24px;border-bottom:1px solid #ddd;background:#fff}
+.brand{display:flex;align-items:center;gap:9px}.brand-icon{display:block;width:30px;height:30px;object-fit:contain;flex:none}.brand>div{display:flex;align-items:baseline;gap:8px;white-space:nowrap}
+.brand strong{font-size:17px;font-weight:600}.brand small{color:#666b73;font-size:11px}
 .header-status{display:flex;align-items:center;gap:10px;font-size:12px;color:#41454d}.header-status #clock{font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}.badge{display:inline-block;padding:7px 10px;border-radius:999px;border:1px solid #ddd;white-space:nowrap}
 .badge.good{color:#0a2e0e;border-color:#b4d5b8;background:#eaf5ec}.badge.warn{color:#694a07;border-color:#e2c575;background:#fff8de}.badge.bad{color:#aa2d00;border-color:#e7bcb0;background:#fff0eb}.badge.neutral{color:#41454d}
-.layout{display:grid;grid-template-columns:218px minmax(0,1fr);min-height:calc(100vh - 76px)}.sidebar{border-right:1px solid #ddd;background:#f8fafc;padding:28px 14px}
+.layout{display:grid;grid-template-columns:218px minmax(0,1fr);min-height:calc(100vh - 62px)}.sidebar{border-right:1px solid #ddd;background:#f8fafc;padding:28px 14px}
 .nav{display:block;width:100%;margin:0 0 4px;padding:12px 15px;text-align:left;background:transparent;border:0;border-radius:8px;color:#41454d;font-size:14px}.nav:hover{background:#e9ecef;color:#181d26}.nav.active{background:#181d26;color:#fff;font-weight:500}
 .content{padding:34px 42px 64px;max-width:1600px;width:100%;margin:0 auto}.view{display:none}.view.active{display:block}
 .real-tabs{display:flex;gap:8px;overflow:auto;border-bottom:1px solid #ddd;margin-bottom:20px}.real-tab{flex:none;padding:12px 18px;background:transparent;border:0;border-bottom:3px solid transparent;color:#62666e;font-size:14px}.real-tab:hover{color:#181d26;background:#f8fafc}.real-tab.active{color:#181d26;border-bottom-color:#181d26;font-weight:600}.real-tab-panel{display:none}.real-tab-panel.active{display:block}
@@ -25,3 +25,16 @@ h2{font-size:18px;font-weight:500;margin:0 0 18px}
 .health-row{display:flex;justify-content:space-between;gap:15px;padding:11px 0;border-bottom:1px solid #e7e8ea;font-size:12px}.health-row:last-child{border:0}.health-row span:first-child{color:#666b73}.form{display:grid;grid-template-columns:1fr 1fr;gap:13px}.form label{font-size:12px;color:#41454d}.form input{display:block;width:100%;margin-top:6px;padding:10px 11px;background:#fff;border:1px solid #b8bdc4;border-radius:6px;color:#181d26}.form input:focus{outline:2px solid #458fff;outline-offset:1px}.form button{grid-column:1/-1;margin-top:4px;justify-self:start}.form-message{min-height:20px;color:#006400}.toast{position:fixed;right:24px;bottom:22px;background:#181d26;color:#fff;padding:13px 17px;border-radius:8px;box-shadow:0 12px 40px #181d2633;z-index:5}
 @media(max-width:980px){.layout{grid-template-columns:minmax(0,1fr)}.sidebar{display:flex;overflow:auto;padding:10px;border-right:0;border-bottom:1px solid #ddd}.nav{white-space:nowrap;width:auto;margin:0 3px}.content{min-width:0;padding:24px}.metrics,.real-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.grid-two{grid-template-columns:1fr}}
 @media(max-width:560px){.topbar{height:auto;min-height:76px;flex-wrap:wrap;gap:8px;padding:10px 14px}.brand-icon{width:32px;height:32px}.header-status{flex-wrap:wrap;justify-content:flex-end;gap:6px;margin-left:auto}.header-status .refresh{padding:0 10px}.header-status #mode-badge{display:none}.content{padding:18px 14px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}#view-virtual .metrics{grid-template-columns:minmax(0,1fr)}.metric{padding:16px;min-height:98px}.metric strong{font-size:19px}.form{grid-template-columns:1fr}.alert{flex-wrap:wrap}.alert-actions{width:100%;padding-left:10px}}
+@media(orientation:landscape) and (max-height:700px){
+  .topbar{height:50px;min-height:50px;flex-wrap:nowrap;gap:10px;padding:0 14px}.brand{gap:6px}.brand-icon{width:24px;height:24px}.brand>div{gap:6px}.brand strong{font-size:15px}.brand small{font-size:10px}
+  .header-status{flex-wrap:nowrap;gap:6px;margin-left:0;font-size:11px}.header-status .badge,.header-status .refresh{height:28px;padding:0 9px}.header-status #clock{font-size:11px}
+  .layout{min-height:calc(100vh - 50px)}.sidebar{padding:8px}.nav{padding:8px 10px;margin:0 0 2px;font-size:12px}.content{padding:14px 18px 28px}
+  .real-tabs{gap:4px;margin-bottom:10px}.real-tab{padding:8px 12px;border-bottom-width:2px;font-size:12px}
+  .metrics{gap:8px;margin-bottom:10px}.metric{padding:9px 12px;min-height:65px}.metric span{font-size:10px;white-space:nowrap}.metric strong{font-size:17px;margin-top:5px;line-height:1.2}.metric small{font-size:10px}
+  .panel{padding:12px 14px;margin-bottom:10px}.panel-head h2,h2{font-size:15px;margin-bottom:9px}.panel-head .tiny{font-size:10px}
+  table{font-size:11px}th{padding:7px 8px}td{padding:8px}.empty{padding:8px 0}.alert{padding:9px 0}.pager{margin-top:9px;gap:7px}
+}
+@media(orientation:landscape) and (max-height:700px) and (min-width:981px){.layout{grid-template-columns:176px minmax(0,1fr)}}
+@media(orientation:landscape) and (max-height:700px) and (max-width:980px){.sidebar{padding:5px 12px}.nav{margin:0 2px}.content{padding:12px 14px 24px}.real-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(orientation:landscape) and (max-height:700px) and (min-width:760px) and (max-width:980px){#view-virtual .metrics{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(orientation:landscape) and (max-height:700px) and (max-width:640px){.header-status #worker-badge,.header-status #mode-badge{display:none}#view-virtual .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.metric strong{font-size:15px}}
