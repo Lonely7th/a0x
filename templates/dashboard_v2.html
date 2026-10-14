@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>A0x · OPENAI-A</title>
   <link rel="icon" type="image/png" href="/static/a0x-icon.png">
-  <link rel="stylesheet" href="/static/app.css?v=landscape-compact-3">
+  <link rel="stylesheet" href="/static/app.css?v=position-history-1">
 </head>
 <body>
   <header class="topbar">
@@ -20,6 +20,12 @@
     </aside>
     <div class="content">
       <section id="view-virtual" class="view">
+        <div class="real-tabs" role="tablist" aria-label="虚拟盘内容">
+          <button id="virtual-tab-overview" class="real-tab active" type="button" role="tab" aria-selected="true" aria-controls="virtual-panel-overview" data-virtual-tab="overview">概览</button>
+          <button id="virtual-tab-actions" class="real-tab" type="button" role="tab" aria-selected="false" aria-controls="virtual-panel-actions" data-virtual-tab="actions">操作记录</button>
+          <button id="virtual-tab-positions" class="real-tab" type="button" role="tab" aria-selected="false" aria-controls="virtual-panel-positions" data-virtual-tab="positions">历史持仓</button>
+        </div>
+        <section id="virtual-panel-overview" class="real-tab-panel active" role="tabpanel" aria-labelledby="virtual-tab-overview" tabindex="0">
         <div class="metrics">
           <article class="metric"><span>初始本金</span><strong id="v-capital">—</strong></article>
           <article class="metric"><span>可部署预算</span><strong id="v-available">—</strong></article>
@@ -28,15 +34,24 @@
         </div>
         <article class="panel"><div class="panel-head"><h2>当前候选股</h2><span id="v-date" class="tiny">—</span></div><div id="v-watch"></div></article>
         <article class="panel"><h2>当前持仓</h2><div id="v-positions"></div></article>
+        </section>
+        <section id="virtual-panel-actions" class="real-tab-panel" role="tabpanel" aria-labelledby="virtual-tab-actions" tabindex="0">
         <article class="panel"><h2>操作记录</h2><div id="v-actions"></div>
           <div class="pager"><button id="v-history-prev" class="secondary" type="button" data-virtual-history-page="prev">上一页</button><span id="v-history-page" aria-live="polite">—</span><button id="v-history-next" class="secondary" type="button" data-virtual-history-page="next">下一页</button></div>
         </article>
+        </section>
+        <section id="virtual-panel-positions" class="real-tab-panel" role="tabpanel" aria-labelledby="virtual-tab-positions" tabindex="0">
+          <article class="panel"><h2>历史持仓</h2><div id="v-closed-positions"></div>
+            <div class="pager"><button class="secondary" type="button" data-virtual-positions-page="prev">上一页</button><span id="v-positions-page" aria-live="polite">—</span><button class="secondary" type="button" data-virtual-positions-page="next">下一页</button></div>
+          </article>
+        </section>
       </section>
       <section id="view-real" class="view active">
         <div class="real-tabs" role="tablist" aria-label="实盘内容">
           <button id="real-tab-signals" class="real-tab active" type="button" role="tab" aria-selected="true" aria-controls="real-panel-signals" data-real-tab="signals">信号</button>
           <button id="real-tab-positions" class="real-tab" type="button" role="tab" aria-selected="false" aria-controls="real-panel-positions" data-real-tab="positions">当前持仓</button>
           <button id="real-tab-history" class="real-tab" type="button" role="tab" aria-selected="false" aria-controls="real-panel-history" data-real-tab="history">操作记录</button>
+          <button id="real-tab-closed" class="real-tab" type="button" role="tab" aria-selected="false" aria-controls="real-panel-closed" data-real-tab="closed">历史持仓</button>
         </div>
         <section id="real-panel-signals" class="real-tab-panel active" role="tabpanel" aria-labelledby="real-tab-signals" tabindex="0">
           <div class="metrics real-metrics">
@@ -56,6 +71,11 @@
             <div class="pager"><button id="r-history-prev" class="secondary" type="button" data-history-page="prev">上一页</button><span id="r-history-page" aria-live="polite">—</span><button id="r-history-next" class="secondary" type="button" data-history-page="next">下一页</button></div>
           </article>
         </section>
+        <section id="real-panel-closed" class="real-tab-panel" role="tabpanel" aria-labelledby="real-tab-closed" tabindex="0">
+          <article class="panel"><h2>历史持仓</h2><p class="tiny">收益率按提醒价和约半仓规则估算，未计费用；不代表实际盈亏。用户自行操作的持仓不计算收益率。</p><div id="r-closed-positions"></div>
+            <div class="pager"><button class="secondary" type="button" data-real-positions-page="prev">上一页</button><span id="r-positions-page" aria-live="polite">—</span><button class="secondary" type="button" data-real-positions-page="next">下一页</button></div>
+          </article>
+        </section>
       </section>
       <section id="view-system" class="view">
         <div id="critical-banner" class="critical hidden"></div>
@@ -64,6 +84,6 @@
     </div>
   </main>
   <div id="toast" class="toast hidden"></div>
-  <script src="/static/dashboard_v2.js?v=virtual-assets-1" defer></script>
+  <script src="/static/dashboard_v2.js?v=position-history-1" defer></script>
 </body>
 </html>

@@ -55,10 +55,16 @@ def test_real_alert_confirmation_tracks_price_and_phase_without_shares(tmp_path:
     init_db(state)
     client = TestClient(create_app(Config(state_db=state, market_db=tmp_path / "unused.duckdb")))
     alert_id = _real_buy_alert(state)
+    assert client.get("/api/virtual").json()["watchlist"][0]["first_target_cents"] == 1100
+    assert client.get("/api/real").json()["watchlist"][0]["first_target_cents"] == 1100
+    signal_at = "2026-10-13T01:02:03+00:00"
+    with connect(state) as db:
+        db.execute("UPDATE alerts SET created_at=? WHERE id=?", (signal_at, alert_id))
     response = client.post(f"/api/real/alerts/{alert_id}/complete")
     assert response.status_code == 200, response.text
     position_id = response.json()["position_id"]
     assert client.post(f"/api/real/alerts/{alert_id}/complete").json()["duplicate"]
+    assert client.get("/api/real").json()["positions"][0]["buy_signal_at"] == signal_at
     with connect(state) as db:
         pos = db.execute("SELECT * FROM real_positions WHERE id=?", (position_id,)).fetchone()
         assert pos["entry_price_cents"] == 1000
@@ -87,6 +93,23 @@ def test_real_alert_confirmation_tracks_price_and_phase_without_shares(tmp_path:
         final_id = db.execute("SELECT id FROM alerts WHERE event_key=?", (final_key,)).fetchone()[0]
     assert client.post(f"/api/real/alerts/{final_id}/complete").status_code == 200
     assert client.get("/api/real").json()["positions"] == []
+    history = client.get("/api/real/positions/history").json()
+    assert history["total"] == 1
+    assert history["positions"][0]["buy_time"] == signal_at
+    assert len(history["positions"][0]["transactions"]) == 3
+    assert abs(history["positions"][0]["estimated_gross_return_pct"] - 0.045) < 1e-10
+    with connect(state) as db:
+        db.execute("""
+            INSERT INTO real_positions(code,entry_date,entry_price_cents,status,
+              created_at,closed_at)
+            VALUES(?,?,?,?,?,?)
+        """, ("sh.600002", "2026-10-12", 1000, "closed",
+              "2026-10-12T09:30:00+08:00", "2026-10-14T10:00:00+08:00"))
+    first_page = client.get("/api/real/positions/history?page_size=1").json()
+    second_page = client.get("/api/real/positions/history?page=2&page_size=1").json()
+    assert first_page["total"] == first_page["pages"] == 2
+    assert first_page["positions"][0]["id"] != second_page["positions"][0]["id"]
+    assert client.get("/api/real/positions/history?page=0").status_code == 400
     report = client.get("/api/real/report").json()
     assert len(report["actions"]) == 3
     assert "actual_closed_realized_pnl_cents" not in report
@@ -128,6 +151,47 @@ def test_real_skip_buy_or_sell_never_leaves_system_managed(tmp_path: Path):
     assert client.post(f"/api/real/alerts/{sell_id}/complete").status_code == 409
     assert client.post(f"/api/real/positions/{position_id}/finish-manual").status_code == 200
     assert client.get("/api/real").json()["positions"] == []
+    history = client.get("/api/real/positions/history").json()["positions"][0]
+    assert history["estimated_gross_return_pct"] is None
+    assert [action["action_kind"] for action in history["transactions"]] == ["partial_profit", "manual_finish"]
+
+
+def test_virtual_closed_positions_include_net_result_and_each_leg(tmp_path: Path):
+    state = tmp_path / "state.sqlite"
+    init_db(state)
+    _real_buy_alert(state)
+    with connect(state) as db:
+        watch_id, settings_id = db.execute(
+            "SELECT id,settings_id FROM watchlist LIMIT 1").fetchone()
+        position_id = db.execute("""
+            INSERT INTO positions(
+              watch_id,code,entry_date,entry_price_cents,bought_shares,
+              remaining_shares,target_pct,initial_stop_cents,prior_peak_cents,
+              peak_asof_date,hold_days,reserved_cents,buy_cash_cents,
+              closed_pnl_cents,status,settings_id,created_at,closed_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (watch_id, "sh.600001", "2026-10-12", 1000, 100,
+              0, "0.10", 950, 1000, "2026-10-12", 3, 100000, 100000,
+              8500, "closed", settings_id, "2026-10-12T09:40:00+08:00",
+              "2026-10-14T10:00:00+08:00")).lastrowid
+        for side, shares, gross, cash, reason, at in (
+            ("buy", 100, 1000, -100000, "strict_crossing", "2026-10-12T09:40:00+08:00"),
+            ("sell", 100, 1085, 108500, "expiry", "2026-10-14T10:00:00+08:00"),
+        ):
+            db.execute("""
+                INSERT INTO virtual_legs(position_id,side,shares,gross_price_cents,
+                  cash_delta_cents,fee_cents,quote_event_key,reason,at)
+                VALUES(?,?,?,?,?,?,?,?,?)
+            """, (position_id, side, shares, gross, cash, 0, side, reason, at))
+    client = TestClient(create_app(Config(state_db=state, market_db=tmp_path / "unused.duckdb")))
+    history = client.get("/api/virtual/positions/history?page_size=1").json()
+    assert history["total"] == history["pages"] == 1
+    position = history["positions"][0]
+    assert position["buy_time"] == "2026-10-12T09:40:00+08:00"
+    assert position["hold_days"] == 3
+    assert position["net_return_pct"] == 0.085
+    assert [leg["side"] for leg in position["transactions"]] == ["buy", "sell"]
+    assert client.get("/api/virtual/positions/history?page=0").status_code == 400
 
 
 def test_real_history_is_paginated_and_includes_manual_finish(tmp_path: Path):

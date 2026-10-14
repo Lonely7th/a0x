@@ -173,6 +173,12 @@ def create_app(config: Config) -> FastAPI:
                                quotes.get(position["code"], position["entry_price_cents"])
                                for position in positions)
             cash = cash_balance(db, day)
+            watchlist = _rows(db, """
+                SELECT * FROM watchlist WHERE entry_date=? ORDER BY rank
+            """, (day,))
+            for watch in watchlist:
+                watch["first_target_cents"] = first_target_cents(
+                    watch["buy_limit_cents"], watch["target_pct"])
             return {
                 "date": day,
                 "capital_cents": setting["capital_cents"],
@@ -182,9 +188,7 @@ def create_app(config: Config) -> FastAPI:
                 "total_asset_cents": cash + market_value,
                 "valuation_fallback_codes": unquoted,
                 "settings": setting,
-                "watchlist": _rows(db, """
-                    SELECT * FROM watchlist WHERE entry_date=? ORDER BY rank
-                """, (day,)),
+                "watchlist": watchlist,
                 "positions": positions,
                 "alerts": _rows(db, """
                     SELECT * FROM alerts
@@ -202,17 +206,20 @@ def create_app(config: Config) -> FastAPI:
         day = datetime.now(SHANGHAI).date().isoformat()
         with connect(config.state_db) as db:
             positions = _rows(db, """
-                SELECT * FROM real_positions WHERE status='open'
-                ORDER BY entry_date,id
+                SELECT p.*,
+                  (SELECT a.created_at FROM alerts AS a
+                   WHERE a.real_position_id=p.id AND a.kind='real_buy'
+                     AND a.action_status='completed'
+                   ORDER BY a.id LIMIT 1) AS buy_signal_at
+                FROM real_positions AS p WHERE p.status='open'
+                ORDER BY p.entry_date,p.id
             """)
             for position in positions:
                 position["first_target_cents"] = (
                     first_target_cents(position["entry_price_cents"], position["target_pct"])
                     if position["target_pct"] is not None else None
                 )
-            return {
-                "date": day,
-                "watchlist": _rows(db, """
+            watchlist = _rows(db, """
                     SELECT w.id,w.entry_date,w.signal_date,w.code,w.rank,
                       w.ret5,w.ret20,w.buy_limit_cents,w.target_pct,
                       w.planned_shares,w.candidate_count,w.status AS watch_status,
@@ -223,7 +230,13 @@ def create_app(config: Config) -> FastAPI:
                       ON e.event_key='real_buy:' || w.entry_date || ':' || w.code
                     LEFT JOIN alerts AS a ON a.event_key=e.event_key
                     WHERE w.entry_date=? ORDER BY w.rank
-                """, (day,)),
+                """, (day,))
+            for watch in watchlist:
+                watch["first_target_cents"] = first_target_cents(
+                    watch["buy_limit_cents"], watch["target_pct"])
+            return {
+                "date": day,
+                "watchlist": watchlist,
                 "positions": positions,
                 "alerts": _rows(db, """
                     SELECT * FROM alerts
@@ -430,6 +443,94 @@ def create_app(config: Config) -> FastAPI:
                 ORDER BY l.at DESC,l.id DESC LIMIT ? OFFSET ?
             """, (page_size, (page - 1) * page_size))
             return {"actions": actions, "total": total, "page": page,
+                    "page_size": page_size, "pages": pages}
+
+    @app.get("/api/virtual/positions/history")
+    def virtual_position_history(page: int = 1, page_size: int = 20):
+        if page < 1 or not 1 <= page_size <= 100:
+            raise HTTPException(400, "Invalid history page or page size")
+        with connect(config.state_db) as db:
+            total = db.execute("SELECT COUNT(*) FROM positions WHERE status='closed'").fetchone()[0]
+            pages = max(1, (total + page_size - 1) // page_size)
+            page = min(page, pages)
+            positions = _rows(db, """
+                SELECT id,code,entry_date,entry_price_cents,bought_shares,
+                       hold_days,buy_cash_cents,closed_pnl_cents,closed_at
+                FROM positions WHERE status='closed'
+                ORDER BY closed_at DESC,id DESC LIMIT ? OFFSET ?
+            """, (page_size, (page - 1) * page_size))
+            for position in positions:
+                position["transactions"] = _rows(db, """
+                    SELECT at,side,shares,gross_price_cents,fee_cents,
+                           cash_delta_cents,reason
+                    FROM virtual_legs WHERE position_id=? ORDER BY at,id
+                """, (position["id"],))
+                buys = [leg for leg in position["transactions"] if leg["side"] == "buy"]
+                position["buy_time"] = buys[0]["at"] if buys else None
+                invested = -sum(leg["cash_delta_cents"] for leg in buys)
+                position["net_return_pct"] = (
+                    position["closed_pnl_cents"] / invested
+                    if invested > 0 and position["closed_pnl_cents"] is not None else None)
+            return {"positions": positions, "total": total, "page": page,
+                    "page_size": page_size, "pages": pages}
+
+    @app.get("/api/real/positions/history")
+    def real_position_history(page: int = 1, page_size: int = 20):
+        if page < 1 or not 1 <= page_size <= 100:
+            raise HTTPException(400, "Invalid history page or page size")
+        with connect(config.state_db) as db:
+            total = db.execute("SELECT COUNT(*) FROM real_positions WHERE status='closed'").fetchone()[0]
+            pages = max(1, (total + page_size - 1) // page_size)
+            page = min(page, pages)
+            positions = _rows(db, """
+                SELECT id,code,entry_date,entry_price_cents,management_mode,closed_at
+                FROM real_positions WHERE status='closed'
+                ORDER BY closed_at DESC,id DESC LIMIT ? OFFSET ?
+            """, (page_size, (page - 1) * page_size))
+            for position in positions:
+                actions = _rows(db, """
+                    SELECT created_at AS signal_at,acted_at,action_status,
+                           action_kind,reference_price_cents
+                    FROM alerts WHERE real_position_id=?
+                      AND kind IN ('real_buy','actual_sell')
+                      AND action_status IN ('completed','skipped')
+                    ORDER BY created_at,id
+                """, (position["id"],))
+                manual = _rows(db, """
+                    SELECT at AS signal_at,at AS acted_at,
+                           'completed' AS action_status,'manual_finish' AS action_kind,
+                           NULL AS reference_price_cents
+                    FROM events WHERE position_id=? AND kind='real_manual_finish'
+                """, (position["id"],))
+                actions.extend(manual)
+                actions.sort(key=lambda action: (action["signal_at"] or "", action["acted_at"] or ""))
+                position["transactions"] = actions
+                buy = next((action for action in actions if action["action_kind"] == "buy"
+                            and action["action_status"] == "completed"), None)
+                position["buy_time"] = buy["signal_at"] if buy else None
+                start = (datetime.fromisoformat(position["buy_time"]).astimezone(SHANGHAI).date()
+                         if position["buy_time"] else date.fromisoformat(position["entry_date"]))
+                end = (datetime.fromisoformat(position["closed_at"]).astimezone(SHANGHAI).date()
+                       if position["closed_at"] else None)
+                position["hold_calendar_days"] = (
+                    max(0, (end - start).days) if end else None)
+                sells = [action for action in actions if action["action_kind"] != "buy"]
+                completed = [action for action in sells if action["action_status"] == "completed"]
+                final = next((action for action in reversed(completed)
+                              if action["action_kind"] not in ("partial_profit", "manual_finish")), None)
+                partial = next((action for action in completed
+                                if action["action_kind"] == "partial_profit"), None)
+                entry = position["entry_price_cents"]
+                if (entry > 0 and final and final["reference_price_cents"]
+                        and not any(action["action_status"] == "skipped" for action in sells)
+                        and not manual):
+                    final_return = final["reference_price_cents"] / entry - 1
+                    position["estimated_gross_return_pct"] = (
+                        (partial["reference_price_cents"] / entry - 1 + final_return) / 2
+                        if partial and partial["reference_price_cents"] else final_return)
+                else:
+                    position["estimated_gross_return_pct"] = None
+            return {"positions": positions, "total": total, "page": page,
                     "page_size": page_size, "pages": pages}
 
     @app.get("/api/real/report")

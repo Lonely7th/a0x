@@ -1,10 +1,10 @@
-const state={virtual:null,real:null,virtualReport:null,virtualActions:null,virtualHistoryPage:1,realReport:null,realHistoryPage:1,health:null,quality:null,quotes:[]};
+const state={virtual:null,real:null,virtualReport:null,virtualActions:null,virtualHistoryPage:1,virtualClosed:null,virtualClosedPage:1,realReport:null,realHistoryPage:1,realClosed:null,realClosedPage:1,health:null,quality:null,quotes:[]};
 const $=id=>document.getElementById(id);
 const esc=value=>String(value??"—").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const money=c=>c==null?"—":new Intl.NumberFormat("zh-CN",{style:"currency",currency:"CNY",maximumFractionDigits:2}).format(c/100);
 const price=c=>c==null?"—":(c/100).toFixed(2);
 const pct=n=>n==null?"—":(Number(n)*100).toFixed(2)+"%";
-const shownTime=value=>value?new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}):"—";
+const shownTime=value=>value?new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}):"—";
 const status=value=>({watching:"观察中",triggered:"已触发",virtual_bought:"虚拟已买",opportunity_only:"虚拟资金不足，仅记录",expired:"已失效",blocked:"已阻断",funded:"预算已预留",cash_insufficient:"虚拟资金不足",held:"已有虚拟持仓",lot_too_small:"不足一手",open:"持仓中"})[value]||value||"—";
 const tag=value=>'<span class="tag">'+esc(status(value))+'</span>';
 
@@ -51,8 +51,8 @@ function renderVirtual(){
   assetNote.textContent=v.valuation_fallback_codes.length?'部分持仓缺少报价，按买入价估算':'';
   assetNote.classList.toggle('hidden',!v.valuation_fallback_codes.length);
   $('v-date').textContent=v.date+' · 候选 '+(v.watchlist[0]?.candidate_count??'—')+' 只';
-  $('v-watch').innerHTML=table(['排名 / 股票','5日收益','20日收益','买入限价','单笔预算','计划股数','止盈档位','最新价','虚拟资格','虚拟状态'],v.watchlist.map(w=>[
-    esc(w.rank)+' · <strong>'+esc(w.code)+'</strong>',pct(w.ret5),pct(w.ret20),price(w.buy_limit_cents),money(w.order_budget_cents??v.settings.budget_cents),esc(w.planned_shares),pct(w.target_pct),latestPrice(w.code,v.date),tag(w.eligibility),tag(w.status)
+  $('v-watch').innerHTML=table(['排名 / 股票','买入限价','首次止盈价','单笔预算','计划股数','止盈档位','最新价','虚拟资格','虚拟状态'],v.watchlist.map(w=>[
+    esc(w.rank)+' · <strong>'+esc(w.code)+'</strong>',price(w.buy_limit_cents),price(w.first_target_cents),money(w.order_budget_cents??v.settings.budget_cents),esc(w.planned_shares),pct(w.target_pct),latestPrice(w.code,v.date),tag(w.eligibility),tag(w.status)
   ]));
   $('v-positions').innerHTML=table(['ID / 股票','入场日','买入价','剩余股数','首次目标','初始止损','移动线','状态'],v.positions.map(p=>[
     esc(p.id)+' · <strong>'+esc(p.code)+'</strong>',esc(p.entry_date),price(p.entry_price_cents),esc(p.remaining_shares),pct(p.target_pct),price(p.initial_stop_cents),p.trailing_line_cents?price(p.trailing_line_cents):'未启用',tag(p.status)
@@ -76,6 +76,26 @@ function renderRealHistory(report){
   $('r-history-prev').disabled=report.page<=1;
   $('r-history-next').disabled=report.page>=report.pages;
 }
+function pageStatus(prefix,history){
+  $(prefix+'-page').textContent='第 '+history.page+' / '+history.pages+' 页 · 共 '+history.total+' 笔';
+  document.querySelector('[data-'+(prefix==='v-positions'?'virtual':'real')+'-positions-page="prev"]').disabled=history.page<=1;
+  document.querySelector('[data-'+(prefix==='v-positions'?'virtual':'real')+'-positions-page="next"]').disabled=history.page>=history.pages;
+}
+const legName=reason=>({strict_crossing:'限价买入',partial_profit:'首次止盈',stop:'止损或退出线',expiry:'持仓到期',buy:'买入',manual_finish:'自行清仓'})[reason]||reason||'清仓';
+function renderVirtualClosed(history){
+  $('v-closed-positions').innerHTML=history.positions.length?history.positions.map(p=>
+    '<div class="history-position"><div class="history-facts"><strong>'+esc(p.code)+'</strong><span>买入价 '+price(p.entry_price_cents)+' 元</span><span>买入时间 '+esc(shownTime(p.buy_time))+'</span><span>持仓 '+esc(p.hold_days)+' 个交易日</span><span>净盈亏 <strong class="'+(p.closed_pnl_cents>=0?'positive':'negative')+'">'+esc(money(p.closed_pnl_cents))+' / '+esc(pct(p.net_return_pct))+'</strong></span></div>'+table(['时间','交易','股数','价格','费用','现金变动'],p.transactions.map(t=>[
+      esc(shownTime(t.at)),esc(t.side==='buy'?'买入':'卖出 · '+legName(t.reason)),esc(t.shares),price(t.gross_price_cents),money(t.fee_cents),money(t.cash_delta_cents)
+    ]))+'</div>').join(''):'<div class="empty">暂无历史持仓</div>';
+  state.virtualClosedPage=history.page;pageStatus('v-positions',history);
+}
+function renderRealClosed(history){
+  $('r-closed-positions').innerHTML=history.positions.length?history.positions.map(p=>
+    '<div class="history-position"><div class="history-facts"><strong>'+esc(p.code)+'</strong><span>买入价 '+price(p.entry_price_cents)+' 元</span><span>买入时间 '+esc(p.buy_time?shownTime(p.buy_time):'历史记录未保存')+'</span><span>持仓 '+esc(p.hold_calendar_days)+' 个自然日</span><span>估算毛收益率 <strong class="'+(p.estimated_gross_return_pct>=0?'positive':'negative')+'">'+esc(p.estimated_gross_return_pct==null?'无法计算':pct(p.estimated_gross_return_pct))+'</strong></span></div>'+table(['提醒时间','交易','提醒价','处理时间','结果'],p.transactions.map(t=>[
+      esc(shownTime(t.signal_at)),esc(legName(t.action_kind)),price(t.reference_price_cents),esc(shownTime(t.acted_at)),esc(t.action_status==='skipped'?'已跳过':'已完成')
+    ]))+'</div>').join(''):'<div class="empty">暂无历史持仓</div>';
+  state.realClosedPage=history.page;pageStatus('r-positions',history);
+}
 function renderReal(){
   const r=state.real,report=state.realReport;if(!r||!report)return;
   $('r-count').textContent=r.watchlist.length+' 只';
@@ -84,15 +104,15 @@ function renderReal(){
   $('r-date').textContent=r.date;
   const heldCodes=new Set(r.positions.map(p=>p.code));
   const buySignals=r.watchlist.filter(w=>!w.buy_signal_at&&w.watch_status!=='blocked'&&w.watch_status!=='expired'&&!heldCodes.has(w.code));
-  $('r-watch').innerHTML=table(['排名 / 股票','5日收益','20日收益','买入限价','建议仓位','单笔计划上限','止盈档位','最新价','状态'],buySignals.map(w=>[
-    esc(w.rank)+' · <strong>'+esc(w.code)+'</strong>',pct(w.ret5),pct(w.ret20),price(w.buy_limit_cents),esc(buyAllocation(w)),money(w.order_budget_cents),pct(w.target_pct),latestPrice(w.code,r.date),'等待触及限价'
+  $('r-watch').innerHTML=table(['排名 / 股票','买入限价','首次止盈价','建议仓位','止盈档位','最新价','状态'],buySignals.map(w=>[
+    esc(w.rank)+' · <strong>'+esc(w.code)+'</strong>',price(w.buy_limit_cents),price(w.first_target_cents),esc(buyAllocation(w)),pct(w.target_pct),latestPrice(w.code,r.date),'等待触及限价'
   ]));
   const pendingSells=new Set(r.alerts.filter(a=>a.kind==='actual_sell'&&a.action_status==='pending').map(a=>a.real_position_id));
   $('r-sell-signals').innerHTML=table(['股票','记录买入价','首次止盈价','止损 / 退出线','最新价','监听状态'],r.positions.filter(p=>p.management_mode==='system').map(p=>[
     '<strong>'+esc(p.code)+'</strong>',price(p.entry_price_cents),p.partial_done?'已完成':price(p.first_target_cents),price(p.partial_done?Math.max(p.entry_price_cents,p.trailing_line_cents):p.initial_stop_cents),latestPrice(p.code,r.date),pendingSells.has(p.id)?'卖出提醒待处理':p.partial_done?'监听余仓退出':'监听首次止盈与初始止损'
   ]));
-  $('r-positions').innerHTML=table(['股票','入场日','记录买入价','首次目标','初始止损','移动线','阶段','状态'],r.positions.map(p=>[
-    '<strong>'+esc(p.code)+'</strong>',esc(p.entry_date),price(p.entry_price_cents),pct(p.target_pct),price(p.initial_stop_cents),p.trailing_line_cents?price(p.trailing_line_cents):'未启用',p.partial_done?'余仓跟踪':'等待首次止盈',p.management_mode==='system'?'系统托管':'用户自行操作持仓 <button class="link" data-finish-manual="'+p.id+'">已自行清仓</button>'
+  $('r-positions').innerHTML=table(['股票','买入时间','记录买入价','首次目标','初始止损','移动线','阶段','状态'],r.positions.map(p=>[
+    '<strong>'+esc(p.code)+'</strong>',esc(p.buy_signal_at?shownTime(p.buy_signal_at):'历史记录未保存'),price(p.entry_price_cents),pct(p.target_pct),price(p.initial_stop_cents),p.trailing_line_cents?price(p.trailing_line_cents):'未启用',p.partial_done?'余仓跟踪':'等待首次止盈',p.management_mode==='system'?'系统托管':'用户自行操作持仓 <button class="link" data-finish-manual="'+p.id+'">已自行清仓</button>'
   ]));
   $('r-alerts').innerHTML=realAlerts(r.alerts.filter(a=>(a.kind==='real_buy'&&a.action_status==='pending'&&a.event_key.split(':')[1]===r.date)||(a.kind==='actual_sell'&&a.action_status==='pending')||(a.event_key.startsWith('actual_')&&!a.read_at)));
   renderRealHistory(report);
@@ -116,7 +136,7 @@ function renderSystem(){
     esc(row.day),esc(row.provider),esc(row.polls),esc(row.requested_quotes),esc(row.received_quotes)
   ]));
 }
-function render(){renderVirtual();if(state.virtualActions)renderVirtualActions(state.virtualActions);renderReal();renderSystem()}
+function render(){renderVirtual();if(state.virtualActions)renderVirtualActions(state.virtualActions);if(state.virtualClosed)renderVirtualClosed(state.virtualClosed);renderReal();if(state.realClosed)renderRealClosed(state.realClosed);renderSystem()}
 let toastTimer;
 function toast(message){const box=$('toast');box.textContent=message;box.classList.remove('hidden');clearTimeout(toastTimer);toastTimer=setTimeout(()=>box.classList.add('hidden'),5000)}
 let refreshPromise=null;
@@ -124,10 +144,10 @@ function refresh(){
   if(refreshPromise)return refreshPromise;
   refreshPromise=(async()=>{
     try{
-      const [virtual,real,virtualReport,virtualActions,realReport,health,quality,quotes]=await Promise.all([
-        api('/api/virtual'),api('/api/real'),api('/api/virtual/report'),api('/api/virtual/actions?page='+state.virtualHistoryPage),api('/api/real/report?page='+state.realHistoryPage),api('/api/health'),api('/api/quote-quality?days=5'),api('/api/quotes')
+      const [virtual,real,virtualReport,virtualActions,virtualClosed,realReport,realClosed,health,quality,quotes]=await Promise.all([
+        api('/api/virtual'),api('/api/real'),api('/api/virtual/report'),api('/api/virtual/actions?page='+state.virtualHistoryPage),api('/api/virtual/positions/history?page='+state.virtualClosedPage),api('/api/real/report?page='+state.realHistoryPage),api('/api/real/positions/history?page='+state.realClosedPage),api('/api/health'),api('/api/quote-quality?days=5'),api('/api/quotes')
       ]);
-      Object.assign(state,{virtual,real,virtualReport,virtualActions,realReport,health,quality,quotes});render();
+      Object.assign(state,{virtual,real,virtualReport,virtualActions,virtualClosed,realReport,realClosed,health,quality,quotes});render();
     }catch(error){toast('刷新失败：'+error.message)}
   })().finally(()=>{refreshPromise=null});
   return refreshPromise;
@@ -135,14 +155,39 @@ function refresh(){
 async function refreshAfterWrite(){if(refreshPromise)await refreshPromise;await refresh()}
 function show(view){document.querySelectorAll('.nav').forEach(button=>button.classList.toggle('active',button.dataset.view===view));document.querySelectorAll('.view').forEach(panel=>panel.classList.toggle('active',panel.id==='view-'+view))}
 function showRealTab(tab){
-  document.querySelectorAll('.real-tab').forEach(button=>{const active=button.dataset.realTab===tab;button.classList.toggle('active',active);button.setAttribute('aria-selected',String(active))});
-  document.querySelectorAll('.real-tab-panel').forEach(panel=>panel.classList.toggle('active',panel.id==='real-panel-'+tab));
+  document.querySelectorAll('[data-real-tab]').forEach(button=>{const active=button.dataset.realTab===tab;button.classList.toggle('active',active);button.setAttribute('aria-selected',String(active))});
+  document.querySelectorAll('#view-real .real-tab-panel').forEach(panel=>panel.classList.toggle('active',panel.id==='real-panel-'+tab));
+}
+function showVirtualTab(tab){
+  document.querySelectorAll('[data-virtual-tab]').forEach(button=>{const active=button.dataset.virtualTab===tab;button.classList.toggle('active',active);button.setAttribute('aria-selected',String(active))});
+  document.querySelectorAll('#view-virtual .real-tab-panel').forEach(panel=>panel.classList.toggle('active',panel.id==='virtual-panel-'+tab));
 }
 document.querySelectorAll('.nav').forEach(button=>button.addEventListener('click',()=>show(button.dataset.view)));
-document.querySelectorAll('.real-tab').forEach(button=>button.addEventListener('click',()=>showRealTab(button.dataset.realTab)));
+document.querySelectorAll('[data-real-tab]').forEach(button=>button.addEventListener('click',()=>showRealTab(button.dataset.realTab)));
+document.querySelectorAll('[data-virtual-tab]').forEach(button=>button.addEventListener('click',()=>showVirtualTab(button.dataset.virtualTab)));
 document.querySelectorAll('.refresh').forEach(button=>button.addEventListener('click',refresh));
 document.addEventListener('click',async event=>{
   const target=event.target;
+  if(target.dataset.virtualPositionsPage){
+    target.disabled=true;
+    try{
+      if(refreshPromise)await refreshPromise;
+      const next=state.virtualClosedPage+(target.dataset.virtualPositionsPage==='next'?1:-1);
+      const history=await api('/api/virtual/positions/history?page='+next);
+      state.virtualClosed=history;renderVirtualClosed(history);
+    }catch(error){toast(error.message);target.disabled=false}
+    return;
+  }
+  if(target.dataset.realPositionsPage){
+    target.disabled=true;
+    try{
+      if(refreshPromise)await refreshPromise;
+      const next=state.realClosedPage+(target.dataset.realPositionsPage==='next'?1:-1);
+      const history=await api('/api/real/positions/history?page='+next);
+      state.realClosed=history;renderRealClosed(history);
+    }catch(error){toast(error.message);target.disabled=false}
+    return;
+  }
   if(target.dataset.virtualHistoryPage){
     target.disabled=true;
     try{
