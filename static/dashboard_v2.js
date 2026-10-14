@@ -4,6 +4,8 @@ const esc=value=>String(value??"—").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&
 const money=c=>c==null?"—":new Intl.NumberFormat("zh-CN",{style:"currency",currency:"CNY",maximumFractionDigits:2}).format(c/100);
 const price=c=>c==null?"—":(c/100).toFixed(2);
 const pct=n=>n==null?"—":(Number(n)*100).toFixed(2)+"%";
+const pnlQuoteTime=value=>new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+const currentPnl=position=>position.current_pnl_pct==null?'—':'<span class="'+(position.current_pnl_pct>0?'positive':position.current_pnl_pct<0?'negative':'')+'" title="含已卖出净收入，余仓按报价估值；未扣未来卖出费用">'+esc(pct(position.current_pnl_pct))+'</span><small class="tiny pnl-asof">截至 '+esc(pnlQuoteTime(position.pnl_quote_time))+'</small>';
 const shownTime=value=>value?new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}):"—";
 const status=value=>({watching:"观察中",triggered:"已触发",virtual_bought:"虚拟已买",opportunity_only:"虚拟资金不足，仅记录",expired:"已失效",blocked:"已阻断",funded:"预算已预留",cash_insufficient:"虚拟资金不足",held:"已有虚拟持仓",lot_too_small:"不足一手",open:"持仓中"})[value]||value||"—";
 const tag=value=>'<span class="tag">'+esc(status(value))+'</span>';
@@ -54,8 +56,8 @@ function renderVirtual(){
   $('v-watch').innerHTML=table(['排名 / 股票','买入限价','首次止盈价','单笔预算','计划股数','止盈档位','最新价','虚拟资格','虚拟状态'],v.watchlist.map(w=>[
     esc(w.rank)+' · <strong>'+esc(w.code)+'</strong>',price(w.buy_limit_cents),price(w.first_target_cents),money(w.order_budget_cents??v.settings.budget_cents),esc(w.planned_shares),pct(w.target_pct),latestPrice(w.code,v.date),tag(w.eligibility),tag(w.status)
   ]));
-  $('v-positions').innerHTML=table(['ID / 股票','入场日','买入价','剩余股数','首次目标','初始止损','移动线','状态'],v.positions.map(p=>[
-    esc(p.id)+' · <strong>'+esc(p.code)+'</strong>',esc(p.entry_date),price(p.entry_price_cents),esc(p.remaining_shares),pct(p.target_pct),price(p.initial_stop_cents),p.trailing_line_cents?price(p.trailing_line_cents):'未启用',tag(p.status)
+  $('v-positions').innerHTML=table(['ID / 股票','入场日','买入价','剩余股数','当前盈亏','首次目标','初始止损','移动线','状态'],v.positions.map(p=>[
+    esc(p.id)+' · <strong>'+esc(p.code)+'</strong>',esc(p.entry_date),price(p.entry_price_cents),esc(p.remaining_shares),currentPnl(p),pct(p.target_pct),price(p.initial_stop_cents),p.trailing_line_cents?price(p.trailing_line_cents):'未启用',tag(p.status)
   ]));
 }
 function renderVirtualActions(history){

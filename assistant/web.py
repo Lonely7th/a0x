@@ -163,10 +163,34 @@ def create_app(config: Config) -> FastAPI:
             positions = _rows(db, """
                 SELECT * FROM positions WHERE status='open' ORDER BY entry_date,id
             """)
-            quotes = {row["code"]: row["last_cents"] for row in _rows(db, """
-                SELECT q.code,q.last_cents FROM quotes AS q
+            quote_rows = {row["code"]: row for row in _rows(db, """
+                SELECT q.code,q.last_cents,q.source_time,q.healthy FROM quotes AS q
                 WHERE q.code IN (SELECT code FROM positions WHERE status='open')
-            """) if row["last_cents"] > 0}
+            """)}
+            quotes = {code: row["last_cents"] for code, row in quote_rows.items()
+                      if row["last_cents"] > 0}
+            trade_flows = {row["position_id"]: row for row in _rows(db, """
+                SELECT l.position_id,
+                  SUM(CASE WHEN l.side='sell' THEN l.cash_delta_cents ELSE 0 END)
+                    AS sold_proceeds_cents,
+                  MIN(CASE WHEN l.side='buy' THEN l.at END) AS buy_time
+                FROM virtual_legs AS l
+                JOIN positions AS p ON p.id=l.position_id
+                WHERE p.status='open' GROUP BY l.position_id
+            """)}
+            for position in positions:
+                quote = quote_rows.get(position["code"])
+                flow = trade_flows.get(position["id"])
+                valid_quote = (quote and quote["healthy"] and quote["last_cents"] > 0
+                               and flow and flow["buy_time"]
+                               and datetime.fromisoformat(quote["source_time"])
+                               >= datetime.fromisoformat(flow["buy_time"]))
+                position["current_pnl_pct"] = (
+                    (flow["sold_proceeds_cents"]
+                     + position["remaining_shares"] * quote["last_cents"]
+                     - position["buy_cash_cents"]) / position["buy_cash_cents"]
+                    if valid_quote and position["buy_cash_cents"] > 0 else None)
+                position["pnl_quote_time"] = quote["source_time"] if valid_quote else None
             unquoted = [position["code"] for position in positions
                         if position["code"] not in quotes]
             market_value = sum(position["remaining_shares"] *

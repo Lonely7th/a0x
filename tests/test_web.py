@@ -194,6 +194,49 @@ def test_virtual_closed_positions_include_net_result_and_each_leg(tmp_path: Path
     assert client.get("/api/virtual/positions/history?page=0").status_code == 400
 
 
+def test_virtual_open_position_pnl_includes_partial_sale_and_valuation(tmp_path: Path):
+    state = tmp_path / "state.sqlite"
+    init_db(state)
+    _real_buy_alert(state)
+    with connect(state) as db:
+        watch_id, settings_id = db.execute(
+            "SELECT id,settings_id FROM watchlist LIMIT 1").fetchone()
+        position_id = db.execute("""
+            INSERT INTO positions(
+              watch_id,code,entry_date,entry_price_cents,bought_shares,
+              remaining_shares,target_pct,initial_stop_cents,prior_peak_cents,
+              peak_asof_date,reserved_cents,buy_cash_cents,status,settings_id,created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (watch_id, "sh.600001", "2026-10-12", 1000, 100,
+              50, "0.10", 950, 1100, "2026-10-13", 100025, 100025,
+              "open", settings_id, "2026-10-12T09:40:00+08:00")).lastrowid
+        for side, shares, gross, cash, fee, at in (
+            ("buy", 100, 1000, -100025, 25, "2026-10-12T09:40:00+08:00"),
+            ("sell", 50, 1100, 54940, 60, "2026-10-13T10:00:00+08:00"),
+        ):
+            db.execute("""
+                INSERT INTO virtual_legs(position_id,side,shares,gross_price_cents,
+                  cash_delta_cents,fee_cents,quote_event_key,reason,at)
+                VALUES(?,?,?,?,?,?,?,?,?)
+            """, (position_id, side, shares, gross, cash, fee, side,
+                  "strict_crossing" if side == "buy" else "partial_profit", at))
+        db.execute("""
+            INSERT INTO quotes(code,provider,source_time,received_at,last_cents,
+                               open_cents,healthy)
+            VALUES(?,?,?,?,?,?,?)
+        """, ("sh.600001", "test", "2026-10-14T10:00:00+08:00",
+              "2026-10-14T10:00:01+08:00", 980, 1000, 1))
+    client = TestClient(create_app(Config(state_db=state, market_db=tmp_path / "unused.duckdb")))
+    position = client.get("/api/virtual").json()["positions"][0]
+    assert position["current_pnl_pct"] == (54940 + 50 * 980 - 100025) / 100025
+    assert position["pnl_quote_time"] == "2026-10-14T10:00:00+08:00"
+    with connect(state) as db:
+        db.execute("UPDATE quotes SET healthy=0 WHERE code='sh.600001'")
+    position = client.get("/api/virtual").json()["positions"][0]
+    assert position["current_pnl_pct"] is None
+    assert position["pnl_quote_time"] is None
+
+
 def test_real_history_is_paginated_and_includes_manual_finish(tmp_path: Path):
     from assistant.storage import alert, append_event
 
