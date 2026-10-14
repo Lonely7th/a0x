@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>A0x · OPENAI-A</title>
   <link rel="icon" type="image/png" href="/static/a0x-icon.png">
-  <link rel="stylesheet" href="/static/app.css?v=virtual-current-pnl-1">
+  <link rel="stylesheet" href="/static/app.css?v=real-alert-status-colors-1">
 </head>
 <body>
   <header class="topbar">
@@ -14,7 +14,7 @@
   </header>
   <main class="layout">
     <aside class="sidebar">
-      <button class="nav active" data-view="real">实盘</button>
+      <button class="nav active" data-view="real">实盘<span id="real-pending-count" class="nav-count hidden" aria-label="未处理提醒"></span></button>
       <button class="nav" data-view="virtual">虚拟盘</button>
       <button class="nav" data-view="system">行情与系统</button>
     </aside>
@@ -84,6 +84,6 @@
     </div>
   </main>
   <div id="toast" class="toast hidden"></div>
-  <script src="/static/dashboard_v2.js?v=virtual-current-pnl-1" defer></script>
+  <script src="/static/dashboard_v2.js?v=real-alert-status-colors-1" defer></script>
 </body>
 </html>

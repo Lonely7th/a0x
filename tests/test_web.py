@@ -156,6 +156,27 @@ def test_real_skip_buy_or_sell_never_leaves_system_managed(tmp_path: Path):
     assert [action["action_kind"] for action in history["transactions"]] == ["partial_profit", "manual_finish"]
 
 
+def test_real_pending_count_tracks_actions_and_unread_reviews(tmp_path: Path):
+    from assistant.storage import alert
+
+    state = tmp_path / "state.sqlite"
+    init_db(state)
+    client = TestClient(create_app(Config(state_db=state, market_db=tmp_path / "unused.duckdb")))
+    buy_id = _real_buy_alert(state)
+    assert client.get("/api/real").json()["pending_alert_count"] == 1
+    with connect(state) as db:
+        alert(db, "actual_review:test", "action_review", "warning",
+              "人工核对", "请核对行情", "sh.600001")
+        review_id = db.execute(
+            "SELECT id FROM alerts WHERE event_key='actual_review:test'").fetchone()[0]
+    board = client.get("/api/real").json()
+    assert board["pending_alert_count"] == len(board["alerts"]) == 2
+    assert client.post(f"/api/alerts/{review_id}/read").status_code == 200
+    assert client.get("/api/real").json()["pending_alert_count"] == 1
+    assert client.post(f"/api/real/alerts/{buy_id}/skip").status_code == 200
+    assert client.get("/api/real").json()["pending_alert_count"] == 0
+
+
 def test_virtual_closed_positions_include_net_result_and_each_leg(tmp_path: Path):
     state = tmp_path / "state.sqlite"
     init_db(state)

@@ -8,7 +8,9 @@ const pnlQuoteTime=value=>new Date(value).toLocaleString('zh-CN',{timeZone:'Asia
 const currentPnl=position=>position.current_pnl_pct==null?'—':'<span class="'+(position.current_pnl_pct>0?'positive':position.current_pnl_pct<0?'negative':'')+'" title="含已卖出净收入，余仓按报价估值；未扣未来卖出费用">'+esc(pct(position.current_pnl_pct))+'</span><small class="tiny pnl-asof">截至 '+esc(pnlQuoteTime(position.pnl_quote_time))+'</small>';
 const shownTime=value=>value?new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}):"—";
 const status=value=>({watching:"观察中",triggered:"已触发",virtual_bought:"虚拟已买",opportunity_only:"虚拟资金不足，仅记录",expired:"已失效",blocked:"已阻断",funded:"预算已预留",cash_insufficient:"虚拟资金不足",held:"已有虚拟持仓",lot_too_small:"不足一手",open:"持仓中"})[value]||value||"—";
-const tag=value=>'<span class="tag">'+esc(status(value))+'</span>';
+const statusTones={watching:'watching',triggered:'triggered',virtual_bought:'virtual-bought',opportunity_only:'opportunity',expired:'expired',blocked:'blocked',funded:'funded',cash_insufficient:'cash-insufficient',held:'held',lot_too_small:'lot-too-small',open:'open'};
+const tag=value=>'<span class="tag tag-'+(statusTones[value]||'neutral')+'">'+esc(status(value))+'</span>';
+const historyPnlClass=value=>value>0?'history-profit':value<0?'history-loss':'';
 
 async function api(path,options={}){
   let response;
@@ -31,7 +33,7 @@ function buyAllocation(watch){
 }
 function realAlerts(rows){
   if(!rows.length)return '<div class="empty">暂无提醒</div>';
-  return rows.slice(0,30).map(a=>{
+  return rows.map(a=>{
     const expiredBuy=a.kind==='real_buy'&&a.event_key.split(':')[1]!==state.real.date;
     const actionable=a.action_status==='pending'&&a.reference_price_cents>0&&!expiredBuy;
     const review=a.kind!=='real_buy'&&a.kind!=='actual_sell';
@@ -86,20 +88,25 @@ function pageStatus(prefix,history){
 const legName=reason=>({strict_crossing:'限价买入',partial_profit:'首次止盈',stop:'止损或退出线',expiry:'持仓到期',buy:'买入',manual_finish:'自行清仓'})[reason]||reason||'清仓';
 function renderVirtualClosed(history){
   $('v-closed-positions').innerHTML=history.positions.length?history.positions.map(p=>
-    '<div class="history-position"><div class="history-facts"><strong>'+esc(p.code)+'</strong><span>买入价 '+price(p.entry_price_cents)+' 元</span><span>买入时间 '+esc(shownTime(p.buy_time))+'</span><span>持仓 '+esc(p.hold_days)+' 个交易日</span><span>净盈亏 <strong class="'+(p.closed_pnl_cents>=0?'positive':'negative')+'">'+esc(money(p.closed_pnl_cents))+' / '+esc(pct(p.net_return_pct))+'</strong></span></div>'+table(['时间','交易','股数','价格','费用','现金变动'],p.transactions.map(t=>[
+    '<div class="history-position"><div class="history-facts"><strong>'+esc(p.code)+'</strong><span>买入价 '+price(p.entry_price_cents)+' 元</span><span>买入时间 '+esc(shownTime(p.buy_time))+'</span><span>持仓 '+esc(p.hold_days)+' 个交易日</span><span class="'+historyPnlClass(p.closed_pnl_cents)+'">净盈亏 <strong>'+esc(money(p.closed_pnl_cents))+' / '+esc(pct(p.net_return_pct))+'</strong></span></div>'+table(['时间','交易','股数','价格','费用','现金变动'],p.transactions.map(t=>[
       esc(shownTime(t.at)),esc(t.side==='buy'?'买入':'卖出 · '+legName(t.reason)),esc(t.shares),price(t.gross_price_cents),money(t.fee_cents),money(t.cash_delta_cents)
     ]))+'</div>').join(''):'<div class="empty">暂无历史持仓</div>';
   state.virtualClosedPage=history.page;pageStatus('v-positions',history);
 }
 function renderRealClosed(history){
   $('r-closed-positions').innerHTML=history.positions.length?history.positions.map(p=>
-    '<div class="history-position"><div class="history-facts"><strong>'+esc(p.code)+'</strong><span>买入价 '+price(p.entry_price_cents)+' 元</span><span>买入时间 '+esc(p.buy_time?shownTime(p.buy_time):'历史记录未保存')+'</span><span>持仓 '+esc(p.hold_calendar_days)+' 个自然日</span><span>估算毛收益率 <strong class="'+(p.estimated_gross_return_pct>=0?'positive':'negative')+'">'+esc(p.estimated_gross_return_pct==null?'无法计算':pct(p.estimated_gross_return_pct))+'</strong></span></div>'+table(['提醒时间','交易','提醒价','处理时间','结果'],p.transactions.map(t=>[
+    '<div class="history-position"><div class="history-facts"><strong>'+esc(p.code)+'</strong><span>买入价 '+price(p.entry_price_cents)+' 元</span><span>买入时间 '+esc(p.buy_time?shownTime(p.buy_time):'历史记录未保存')+'</span><span>持仓 '+esc(p.hold_calendar_days)+' 个自然日</span><span class="'+historyPnlClass(p.estimated_gross_return_pct)+'">估算毛收益率 <strong>'+esc(p.estimated_gross_return_pct==null?'无法计算':pct(p.estimated_gross_return_pct))+'</strong></span></div>'+table(['提醒时间','交易','提醒价','处理时间','结果'],p.transactions.map(t=>[
       esc(shownTime(t.signal_at)),esc(legName(t.action_kind)),price(t.reference_price_cents),esc(shownTime(t.acted_at)),esc(t.action_status==='skipped'?'已跳过':'已完成')
     ]))+'</div>').join(''):'<div class="empty">暂无历史持仓</div>';
   state.realClosedPage=history.page;pageStatus('r-positions',history);
 }
 function renderReal(){
   const r=state.real,report=state.realReport;if(!r||!report)return;
+  const pendingBadge=$('real-pending-count');
+  const pendingCount=Number(r.pending_alert_count)||0;
+  pendingBadge.textContent=pendingCount>0?String(pendingCount):'';
+  pendingBadge.classList.toggle('hidden',pendingCount<=0);
+  pendingBadge.setAttribute('aria-label','未处理提醒 '+pendingCount+' 条');
   $('r-count').textContent=r.watchlist.length+' 只';
   $('r-open').textContent=r.positions.filter(p=>p.management_mode==='system').length+' 笔';
   $('r-manual').textContent=r.positions.filter(p=>p.management_mode==='user_managed').length+' 笔';
@@ -116,7 +123,8 @@ function renderReal(){
   $('r-positions').innerHTML=table(['股票','买入时间','记录买入价','首次目标','初始止损','移动线','阶段','状态'],r.positions.map(p=>[
     '<strong>'+esc(p.code)+'</strong>',esc(p.buy_signal_at?shownTime(p.buy_signal_at):'历史记录未保存'),price(p.entry_price_cents),pct(p.target_pct),price(p.initial_stop_cents),p.trailing_line_cents?price(p.trailing_line_cents):'未启用',p.partial_done?'余仓跟踪':'等待首次止盈',p.management_mode==='system'?'系统托管':'用户自行操作持仓 <button class="link" data-finish-manual="'+p.id+'">已自行清仓</button>'
   ]));
-  $('r-alerts').innerHTML=realAlerts(r.alerts.filter(a=>(a.kind==='real_buy'&&a.action_status==='pending'&&a.event_key.split(':')[1]===r.date)||(a.kind==='actual_sell'&&a.action_status==='pending')||(a.event_key.startsWith('actual_')&&!a.read_at)));
+  const pendingAlerts=r.alerts.filter(a=>(a.kind==='real_buy'&&a.action_status==='pending'&&a.event_key.split(':')[1]===r.date)||(a.kind==='actual_sell'&&a.action_status==='pending')||(a.event_key.startsWith('actual_')&&!a.read_at));
+  $('r-alerts').innerHTML=realAlerts(pendingAlerts)+(pendingCount>pendingAlerts.length?'<div class="tiny">仅显示最近 100 条提醒</div>':'');
   renderRealHistory(report);
 }
 function renderSystem(){

@@ -258,18 +258,24 @@ def create_app(config: Config) -> FastAPI:
             for watch in watchlist:
                 watch["first_target_cents"] = first_target_cents(
                     watch["buy_limit_cents"], watch["target_pct"])
+            pending_filter = """
+                (kind='real_buy' AND action_status='pending'
+                 AND substr(event_key,10,10)=?)
+                OR (kind='actual_sell' AND action_status='pending')
+                OR (event_key LIKE 'actual_%'
+                    AND kind NOT IN ('real_buy','actual_sell')
+                    AND read_at IS NULL)
+            """
+            pending_count = db.execute(
+                f"SELECT COUNT(*) FROM alerts WHERE {pending_filter}", (day,)
+            ).fetchone()[0]
             return {
                 "date": day,
                 "watchlist": watchlist,
                 "positions": positions,
-                "alerts": _rows(db, """
-                    SELECT * FROM alerts
-                    WHERE (kind='real_buy' AND action_status='pending'
-                           AND substr(event_key,10,10)=?)
-                       OR (kind='actual_sell' AND action_status='pending')
-                       OR (event_key LIKE 'actual_%'
-                           AND kind NOT IN ('real_buy','actual_sell')
-                           AND read_at IS NULL)
+                "pending_alert_count": pending_count,
+                "alerts": _rows(db, f"""
+                    SELECT * FROM alerts WHERE {pending_filter}
                     ORDER BY CASE WHEN kind IN ('real_buy','actual_sell')
                                   THEN 0 ELSE 1 END,id DESC LIMIT 100
                 """, (day,)),
