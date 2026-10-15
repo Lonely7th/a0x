@@ -90,7 +90,7 @@ class Engine:
                     shares = planned_shares(yuan(limit), order_budget, settings)
                     budget_left = available_budget(self.db, day)
                     if held:
-                        eligibility, reserve, reason = "held", 0, "已有同股虚拟持仓"
+                        eligibility, reserve, reason = "held", 0, "已有同股虚拟持仓，今日不再监听买入"
                     elif shares < 100:
                         eligibility, reserve, reason = "lot_too_small", 0, "预算不足购买一手"
                     elif budget_left < order_budget:
@@ -110,7 +110,7 @@ class Engine:
                           candidate["q_close"], candidate["raw_close"],
                           candidate["liquidity20"], limit, str(target),
                           shares, reserve, candidate_count, order_budget,
-                          eligibility, "watching",
+                          eligibility, "blocked" if held else "watching",
                           reason, settings["id"], self.strategy_hash, now_utc_iso()))
                     watch_id = self.db.execute("SELECT last_insert_rowid()").fetchone()[0]
                     append_event(self.db, f"watch:{day}:{code}", "watch_published",
@@ -119,6 +119,10 @@ class Engine:
                                   "eligibility": eligibility, "reserved_cents": reserve,
                                   "candidate_count": candidate_count,
                                   "order_budget_cents": order_budget})
+                    if held:
+                        append_event(self.db, f"entry_excluded:{day}:{code}",
+                                     "entry_excluded", code, watch_id, None,
+                                     {"reason": reason, "limit_cents": limit})
                     published.append({"code": code, "rank": rank,
                                       "eligibility": eligibility,
                                       "order_budget_cents": order_budget})
@@ -244,12 +248,43 @@ class Engine:
                   quote.preclose_cents, quote.bid_cents, quote.ask_cents,
                   quote.bid_volume, quote.ask_volume, int(health),
                   None if health else "stale_or_outside_session", quote.raw_hash))
-        if not health or not allow_triggers:
+        if not health:
+            return
+        self._exclude_unbuyable_watch(quote)
+        if not allow_triggers:
             return
         self._real_entry_quote(quote)
         self._entry_quote(quote)
         self._exit_quote(quote)
         self._actual_sell_signal(quote)
+
+    def _exclude_unbuyable_watch(self, quote: Quote) -> None:
+        day = quote.source_time.date().isoformat()
+        with transaction(self.db):
+            watch = self.db.execute(
+                "SELECT * FROM watchlist WHERE entry_date=? AND code=? AND status='watching'",
+                (day, quote.code),
+            ).fetchone()
+            if watch is None:
+                return
+            held = self.db.execute(
+                "SELECT 1 FROM positions WHERE code=? AND status='open'", (quote.code,),
+            ).fetchone()
+            if held:
+                reason = "已有同股虚拟持仓，今日不再监听买入"
+            elif quote.open_cents <= watch["buy_limit_cents"]:
+                reason = "当日开盘价不高于买入限价，严格穿越条件无法满足"
+            else:
+                return
+            self.db.execute(
+                "UPDATE watchlist SET status='blocked',block_reason=?,reserved_cents=0 WHERE id=?",
+                (reason, watch["id"]),
+            )
+            append_event(self.db, f"entry_excluded:{day}:{quote.code}",
+                         "entry_excluded", quote.code, watch["id"], None,
+                         {"reason": reason, "open_cents": quote.open_cents,
+                          "limit_cents": watch["buy_limit_cents"],
+                          "source_time": quote.source_time.isoformat()})
 
     def _focus_quote(self, quote: Quote) -> None:
         day = quote.source_time.date().isoformat()

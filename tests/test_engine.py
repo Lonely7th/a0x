@@ -12,7 +12,7 @@ from assistant.engine import Engine
 from assistant import market as market_module
 from assistant.market import MarketStore
 from assistant.quotes import Quote
-from assistant.storage import connect, init_db
+from assistant.storage import available_budget, connect, init_db
 from assistant.strategy import (buy_limit_cents, intraday_profit_crossed,
                                 partial_shares, strict_crossing)
 from assistant.web import create_app
@@ -117,6 +117,75 @@ def test_rule_boundaries():
     assert partial_shares(300) == 100
     assert not intraday_profit_crossed(969, 960, "0.01")
     assert intraday_profit_crossed(971, 960, "0.01")
+
+
+@pytest.mark.parametrize("opening_offset", [-1, 0])
+def test_low_or_equal_open_stops_buy_watch_and_releases_budget(app_parts, opening_offset):
+    engine, _, state_path, _, entry_day, _, _ = app_parts
+    engine.preopen(entry_day, sync=False)
+    with connect(state_path) as db:
+        watch = db.execute("SELECT * FROM watchlist ORDER BY rank LIMIT 1").fetchone()
+        code, limit = watch["code"], watch["buy_limit_cents"]
+        assert watch["reserved_cents"] > 0
+        before = available_budget(db, entry_day.isoformat())
+
+    # Exclusion is housekeeping and still runs when buy/sell triggers are paused.
+    engine.process_quote(quote(code, entry_day, limit - 1, limit + opening_offset, 879),
+                         allow_triggers=False)
+    with connect(state_path) as db:
+        excluded = db.execute("SELECT * FROM watchlist WHERE code=?", (code,)).fetchone()
+        assert excluded["status"] == "blocked"
+        assert excluded["reserved_cents"] == 0
+        assert "开盘价不高于" in excluded["block_reason"]
+        assert available_budget(db, entry_day.isoformat()) == before + watch["reserved_cents"]
+        assert db.execute("SELECT COUNT(*) FROM events WHERE kind='entry_excluded'").fetchone()[0] == 1
+    assert code not in engine.monitored_codes(entry_day)
+
+    engine.process_quote(quote(code, entry_day, limit - 1, limit + 1, 879),
+                         allow_triggers=True)
+    with connect(state_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM alerts WHERE kind='real_buy'").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 0
+
+
+def test_existing_virtual_position_is_not_watched_for_another_buy(app_parts):
+    engine, _, state_path, signal_day, entry_day, _, _ = app_parts
+    candidate = engine.market.signals(signal_day)[0]
+    code = candidate["code"]
+    with connect(state_path) as db:
+        settings_id = db.execute("SELECT id FROM settings LIMIT 1").fetchone()[0]
+        cursor = db.execute("""
+            INSERT INTO watchlist(
+              entry_date,signal_date,code,rank,ret5,ret20,atr14,q_close,
+              raw_close,liquidity20,buy_limit_cents,target_pct,settings_id,created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (signal_day.isoformat(), signal_day.isoformat(), code, 1,
+              candidate["ret5"], candidate["ret20"], candidate["atr14"],
+              candidate["q_close"], candidate["raw_close"], candidate["liquidity20"],
+              843, "0.10", settings_id, datetime.now().isoformat()))
+        db.execute("""
+            INSERT INTO positions(
+              watch_id,code,entry_date,entry_price_cents,bought_shares,
+              remaining_shares,target_pct,initial_stop_cents,prior_peak_cents,
+              peak_asof_date,reserved_cents,buy_cash_cents,settings_id,created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (cursor.lastrowid, code, signal_day.isoformat(), 843, 100,
+              100, "0.10", 800, 843, signal_day.isoformat(),
+              7_500_000, 84_300, settings_id, datetime.now().isoformat()))
+
+    engine.preopen(entry_day, sync=False)
+    with connect(state_path) as db:
+        watch = db.execute("SELECT * FROM watchlist WHERE entry_date=? AND code=?",
+                           (entry_day.isoformat(), code)).fetchone()
+        assert watch["eligibility"] == "held"
+        assert watch["status"] == "blocked"
+        assert watch["reserved_cents"] == 0
+    # The quote is still needed to manage the existing position, not to watch a new buy.
+    assert code in engine.monitored_codes(entry_day)
+    engine.process_quote(quote(code, entry_day, 842, 844, 879), allow_triggers=True)
+    with connect(state_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM alerts WHERE kind='real_buy'").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 1
 
 
 @pytest.mark.parametrize("candidate_count,expected_budget", [(49, 7_500_000),

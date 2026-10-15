@@ -53,8 +53,9 @@ function renderVirtual(){
   const assetNote=$('v-assets-note');
   assetNote.textContent=v.valuation_fallback_codes.length?'部分持仓缺少报价，按买入价估算':'';
   assetNote.classList.toggle('hidden',!v.valuation_fallback_codes.length);
-  $('v-date').textContent=v.date+' · 候选 '+(v.watchlist[0]?.candidate_count??'—')+' 只';
-  $('v-watch').innerHTML=table(['排名 / 股票','买入限价','首次止盈价','单笔预算','计划股数','止盈档位','最新价','虚拟资格','虚拟状态'],v.watchlist.map(w=>[
+  const activeWatches=v.watchlist.filter(w=>w.status==='watching'&&w.eligibility!=='held');
+  $('v-date').textContent=v.date+' · 监听 '+activeWatches.length+' 只';
+  $('v-watch').innerHTML=table(['排名 / 股票','买入限价','首次止盈价','单笔预算','计划股数','止盈档位','最新价','虚拟资格','虚拟状态'],activeWatches.map(w=>[
     esc(w.rank)+' · <strong>'+esc(w.code)+'</strong>',price(w.buy_limit_cents),price(w.first_target_cents),money(w.order_budget_cents??v.settings.budget_cents),esc(w.planned_shares),pct(w.target_pct),latestPrice(w.code,v.date),tag(w.eligibility),tag(w.status)
   ]));
   $('v-positions').innerHTML=table(['ID / 股票','入场日','买入价','剩余股数','最新价','当前盈亏','首次目标','初始止损','移动线','状态'],v.positions.map(p=>[
