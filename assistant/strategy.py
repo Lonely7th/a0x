@@ -14,12 +14,29 @@ def order_budget_cents(normal_budget_cents: int, candidate_count: int) -> int:
             else normal_budget_cents)
 
 
-def buy_limit_cents(raw_close: object) -> int:
-    return int((dec(raw_close) * Decimal("96")).to_integral_value(rounding=ROUND_FLOOR))
+def buy_limit_cents(raw_close: object, atr14_adjusted: object,
+                    q_close: object) -> int:
+    adjusted_close = dec(q_close)
+    adjusted_atr = dec(atr14_adjusted)
+    if dec(raw_close) <= 0 or adjusted_close <= 0 or adjusted_atr < 0:
+        raise ValueError("Invalid signal-day price or ATR")
+    discount = Decimal("0.0225") + Decimal("0.25") * adjusted_atr / adjusted_close
+    return int((dec(raw_close) * (1 - discount) * 100).to_integral_value(
+        rounding=ROUND_FLOOR))
 
 
-def target_pct(ret20: float) -> Decimal:
-    return Decimal("0.10") if ret20 <= -0.10 else Decimal("0.01")
+def target_pct(ret20: float, candidate_count: int = 50) -> Decimal:
+    if ret20 <= -0.10:
+        return Decimal("0.10") if candidate_count >= SURGE_CANDIDATE_THRESHOLD else Decimal("0.08")
+    return Decimal("0.01")
+
+
+def exit_plan(ret20: float, candidate_count: int, strategy_id: str) -> tuple[Decimal | None, bool]:
+    if strategy_id == "aggressive" and ret20 <= -0.10:
+        return None, True
+    if strategy_id not in ("stable", "aggressive"):
+        raise ValueError(strategy_id)
+    return target_pct(ret20, candidate_count), False
 
 
 def strict_crossing(open_cents: int, last_cents: int, limit_cents: int) -> bool:
@@ -72,6 +89,7 @@ def virtual_exit(
     *, entry_cents: int, remaining: int, target: object, initial_stop: int,
     trailing_line: int, partial_done: bool, hold_days: int,
     open_cents: int, last_cents: int, is_opening_snapshot: bool,
+    no_partial: bool = False,
 ) -> ExitDecision | None:
     if hold_days <= 0 or remaining <= 0:
         return None
@@ -80,6 +98,8 @@ def virtual_exit(
     stop = max(initial_stop, trailing_line if partial_done else 0)
     if last_cents <= stop:
         return ExitDecision("stop", remaining, min(last_cents, stop), stop)
+    if no_partial:
+        return None
     if partial_done:
         return None
     target_line = first_target_cents(entry_cents, target)

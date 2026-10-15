@@ -14,7 +14,7 @@ from assistant.market import MarketStore
 from assistant.quotes import Quote
 from assistant.storage import available_budget, connect, init_db
 from assistant.strategy import (buy_limit_cents, intraday_profit_crossed,
-                                partial_shares, strict_crossing)
+                                partial_shares, strict_crossing, virtual_exit)
 from assistant.web import create_app
 
 
@@ -110,13 +110,28 @@ def add_bar(market: MarketStore, code: str, day: date, close: float, high: float
 
 
 def test_rule_boundaries():
-    assert buy_limit_cents(10) == 960
+    assert buy_limit_cents(10, 0.5, 10) == 965
+    assert buy_limit_cents(10, 1, 20) == 965
+    assert buy_limit_cents(10, 0.4, 10) == 967
+    with pytest.raises(ValueError):
+        buy_limit_cents(10, 0.5, 0)
     assert strict_crossing(961, 959, 960)
     assert not strict_crossing(960, 959, 960)
     assert not strict_crossing(961, 960, 960)
     assert partial_shares(300) == 100
     assert not intraday_profit_crossed(969, 960, "0.01")
     assert intraday_profit_crossed(971, 960, "0.01")
+
+
+def test_aggressive_deep_exit_keeps_full_position_until_stop_or_expiry():
+    kwargs = dict(entry_cents=1000, remaining=1000, target=None,
+                  initial_stop=920, trailing_line=0, partial_done=False,
+                  open_cents=1100, is_opening_snapshot=False, no_partial=True)
+    assert virtual_exit(**kwargs, hold_days=1, last_cents=1250) is None
+    stop = virtual_exit(**kwargs, hold_days=1, last_cents=910)
+    assert stop.kind == "stop" and stop.shares == 1000
+    expiry = virtual_exit(**kwargs, hold_days=20, last_cents=1250)
+    assert expiry.kind == "expiry" and expiry.shares == 1000
 
 
 @pytest.mark.parametrize("opening_offset", [-1, 0])
@@ -210,6 +225,8 @@ def test_surge_budget_uses_full_candidate_count(app_parts, monkeypatch,
         assert all(row["order_budget_cents"] == expected_budget for row in watches)
         assert all(row["eligibility"] == "funded" for row in watches)
         assert all(row["reserved_cents"] == expected_budget for row in watches)
+        assert all(row["target_pct"] == ("0.10" if candidate_count >= 50 else "0.08")
+                   for row in watches)
 
 
 @pytest.mark.parametrize("candidate_count,budget,allocation", [
@@ -266,7 +283,7 @@ def test_five_watch_budget_opportunity_and_restart(app_parts):
     assert watches[0]["eligibility"] == "funded"
     assert watches[1]["eligibility"] == "cash_insufficient"
     limit = watches[0]["buy_limit_cents"]
-    assert limit == 843
+    assert limit == 852
     for watch in watches:
         signal = quote(watch["code"], entry_day, limit - 1, limit + 1, 879)
         if watch["eligibility"] == "cash_insufficient":
@@ -421,7 +438,7 @@ def test_real_sale_alert_does_not_depend_on_bid_depth(app_parts):
                                   "bid_volume": 0}), allow_triggers=True)
     with connect(state_path) as db:
         sell = db.execute("SELECT * FROM alerts WHERE kind='actual_sell'").fetchone()
-        assert sell["reference_price_cents"] == 928
+        assert sell["reference_price_cents"] == 911
         assert sell["action_status"] == "pending"
         assert sell["action_kind"] == "partial_profit"
     client = TestClient(create_app(engine.config))
@@ -429,6 +446,41 @@ def test_real_sale_alert_does_not_depend_on_bid_depth(app_parts):
     with connect(state_path) as db:
         assert db.execute("SELECT management_mode FROM real_positions").fetchone()[0] == "user_managed"
     assert code not in engine.monitored_codes(exit_day)
+
+
+def test_stable_and_aggressive_virtual_accounts_buy_same_signal_independently(app_parts):
+    engine, market, state_path, _, entry_day, exit_day, _ = app_parts
+    engine.preopen(entry_day, sync=False)
+    with connect(state_path) as db:
+        watch = db.execute("SELECT * FROM watchlist ORDER BY rank LIMIT 1").fetchone()
+        order = db.execute("SELECT * FROM aggressive_orders WHERE watch_id=?",
+                           (watch["id"],)).fetchone()
+        assert watch["target_pct"] == "0.08"
+        assert order["no_partial"] == 1 and order["target_pct"] is None
+        code, limit = watch["code"], watch["buy_limit_cents"]
+    engine.process_quote(quote(code, entry_day, limit - 1, limit + 1, 879),
+                         allow_triggers=True)
+    with connect(state_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM positions WHERE code=?", (code,)).fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM aggressive_positions WHERE code=?",
+                          (code,)).fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM virtual_legs").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM aggressive_legs").fetchone()[0] == 1
+    client = TestClient(create_app(engine.config))
+    stable = client.get("/api/virtual?account=stable").json()
+    aggressive = client.get("/api/virtual?account=aggressive").json()
+    assert stable["capital_cents"] == 10_000_000
+    assert aggressive["capital_cents"] == 100_000_000
+    assert stable["positions"][0]["code"] == aggressive["positions"][0]["code"]
+    expected_buy_time = f"{entry_day.isoformat()}T10:00:00+08:00"
+    assert stable["positions"][0]["buy_time"] == expected_buy_time
+    assert aggressive["positions"][0]["buy_time"] == expected_buy_time
+    assert aggressive["positions"][0]["no_partial"] == 1
+    add_bar(market, code, entry_day, 8.4, 8.5)
+    engine.process_quote(quote(code, exit_day, 940, 930, 840), allow_triggers=True)
+    with connect(state_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM virtual_legs WHERE side='sell'").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM aggressive_legs WHERE side='sell'").fetchone()[0] == 0
 
 
 def test_extra_candidates_are_not_published_or_monitored(app_parts, monkeypatch):

@@ -5,17 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>A0x · OPENAI-A</title>
   <link rel="icon" type="image/png" href="/static/a0x-icon.png">
-  <link rel="stylesheet" href="/static/app.css?v=virtual-latest-pnl-1">
+  <link rel="stylesheet" href="/static/app.css?v=system-refresh-1">
 </head>
 <body>
   <header class="topbar">
     <div class="brand"><img class="brand-icon" src="/static/a0x-icon.png" alt=""><div><strong>A0x</strong><small>OPENAI-A</small></div></div>
-    <div class="header-status"><span id="worker-badge" class="badge neutral">后台检测中</span><span id="mode-badge" class="badge neutral">模式检测中</span><button class="secondary refresh" type="button">刷新数据 ↗</button><span id="clock"></span></div>
+    <div class="header-status"><span id="worker-badge" class="worker-indicator warn" role="status" aria-label="后台状态检测中" title="后台状态检测中"><span class="worker-dot" aria-hidden="true"></span></span><span id="mode-badge" class="badge warn hidden">观察模式</span><div id="market-indices" class="market-indices" aria-label="大盘行情">指数行情加载中</div><span id="clock"></span></div>
   </header>
   <main class="layout">
     <aside class="sidebar">
       <button class="nav active" data-view="real">实盘<span id="real-pending-count" class="nav-count hidden" aria-label="未处理提醒"></span></button>
-      <button class="nav" data-view="virtual">虚拟盘</button>
+      <button class="nav" data-view="virtual-stable">虚拟盘-稳健</button>
+      <button class="nav" data-view="virtual-aggressive">虚拟盘-激进</button>
       <button class="nav" data-view="system">行情与系统</button>
     </aside>
     <div class="content">
@@ -52,6 +53,7 @@
           <button id="real-tab-positions" class="real-tab" type="button" role="tab" aria-selected="false" aria-controls="real-panel-positions" data-real-tab="positions">当前持仓</button>
           <button id="real-tab-history" class="real-tab" type="button" role="tab" aria-selected="false" aria-controls="real-panel-history" data-real-tab="history">操作记录</button>
           <button id="real-tab-closed" class="real-tab" type="button" role="tab" aria-selected="false" aria-controls="real-panel-closed" data-real-tab="closed">历史持仓</button>
+          <button id="real-tab-settings" class="real-tab" type="button" role="tab" aria-selected="false" aria-controls="real-panel-settings" data-real-tab="settings">设置</button>
         </div>
         <section id="real-panel-signals" class="real-tab-panel active" role="tabpanel" aria-labelledby="real-tab-signals" tabindex="0">
           <div class="metrics real-metrics">
@@ -76,14 +78,17 @@
             <div class="pager"><button class="secondary" type="button" data-real-positions-page="prev">上一页</button><span id="r-positions-page" aria-live="polite">—</span><button class="secondary" type="button" data-real-positions-page="next">下一页</button></div>
           </article>
         </section>
+        <section id="real-panel-settings" class="real-tab-panel" role="tabpanel" aria-labelledby="real-tab-settings" tabindex="0">
+          <article class="panel"><h2>实盘策略</h2><div class="strategy-switch"><button type="button" class="secondary" data-real-strategy="stable">稳健</button><button type="button" class="secondary" data-real-strategy="aggressive">激进</button></div><p id="real-strategy-note" class="tiny">—</p></article>
+        </section>
       </section>
       <section id="view-system" class="view">
         <div id="critical-banner" class="critical hidden"></div>
-        <div class="grid-two"><article class="panel"><h2>服务状态</h2><div id="system-health"></div></article><article class="panel"><h2>行情覆盖</h2><div id="system-quality"></div></article></div>
+        <div class="grid-two"><article class="panel"><div class="panel-head system-panel-head"><h2>服务状态</h2><button class="secondary refresh" type="button">刷新数据 ↗</button></div><div id="system-health"></div></article><article class="panel"><h2>行情覆盖</h2><div id="system-quality"></div></article></div>
       </section>
     </div>
   </main>
   <div id="toast" class="toast hidden"></div>
-  <script src="/static/dashboard_v2.js?v=entry-exclusions-1" defer></script>
+  <script src="/static/dashboard_v2.js?v=indices-only-1" defer></script>
 </body>
 </html>

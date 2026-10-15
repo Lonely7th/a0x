@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Iterator
 
 from .config import now_cn, now_utc_iso, strategy_manifest
+from .strategy import exit_plan
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -246,6 +247,74 @@ CREATE TABLE IF NOT EXISTS system_status (
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS aggressive_orders (
+  watch_id INTEGER PRIMARY KEY REFERENCES watchlist(id),
+  planned_shares INTEGER NOT NULL DEFAULT 0,
+  reserved_cents INTEGER NOT NULL DEFAULT 0,
+  order_budget_cents INTEGER NOT NULL,
+  target_pct TEXT,
+  no_partial INTEGER NOT NULL DEFAULT 0,
+  eligibility TEXT NOT NULL DEFAULT 'pending',
+  status TEXT NOT NULL DEFAULT 'watching',
+  block_reason TEXT,
+  triggered_at TEXT
+);
+CREATE TABLE IF NOT EXISTS aggressive_positions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  watch_id INTEGER NOT NULL UNIQUE REFERENCES watchlist(id),
+  code TEXT NOT NULL,
+  entry_date TEXT NOT NULL,
+  entry_price_cents INTEGER NOT NULL,
+  bought_shares INTEGER NOT NULL,
+  remaining_shares INTEGER NOT NULL,
+  target_pct TEXT,
+  no_partial INTEGER NOT NULL DEFAULT 0,
+  initial_stop_cents INTEGER NOT NULL,
+  trailing_line_cents INTEGER NOT NULL DEFAULT 0,
+  prior_peak_cents INTEGER NOT NULL,
+  peak_asof_date TEXT NOT NULL,
+  partial_done INTEGER NOT NULL DEFAULT 0,
+  hold_days INTEGER NOT NULL DEFAULT 0,
+  reserved_cents INTEGER NOT NULL,
+  buy_cash_cents INTEGER NOT NULL,
+  closed_pnl_cents INTEGER,
+  status TEXT NOT NULL DEFAULT 'open',
+  block_reason TEXT,
+  settings_id INTEGER NOT NULL REFERENCES settings(id),
+  strategy_hash TEXT,
+  created_at TEXT NOT NULL,
+  closed_at TEXT,
+  CHECK(remaining_shares>=0 AND remaining_shares<=bought_shares)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_aggressive_positions_code_open
+  ON aggressive_positions(code) WHERE status='open';
+CREATE TABLE IF NOT EXISTS aggressive_legs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  position_id INTEGER NOT NULL REFERENCES aggressive_positions(id),
+  side TEXT NOT NULL CHECK(side IN ('buy','sell')),
+  shares INTEGER NOT NULL CHECK(shares>0),
+  gross_price_cents INTEGER NOT NULL,
+  cash_delta_cents INTEGER NOT NULL,
+  fee_cents INTEGER NOT NULL,
+  quote_event_key TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  at TEXT NOT NULL,
+  UNIQUE(position_id, quote_event_key)
+);
+CREATE INDEX IF NOT EXISTS ix_aggressive_legs_at ON aggressive_legs(at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS real_strategy_schedule (
+  effective_date TEXT PRIMARY KEY,
+  strategy_id TEXT NOT NULL CHECK(strategy_id IN ('stable','aggressive')),
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS market_indices (
+  code TEXT PRIMARY KEY,
+  last_cents INTEGER NOT NULL,
+  preclose_cents INTEGER NOT NULL,
+  source_time TEXT NOT NULL,
+  received_at TEXT NOT NULL,
+  provider TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS ix_watch_entry_date ON watchlist(entry_date, rank);
 CREATE INDEX IF NOT EXISTS ix_focus_entry_date ON focus_watchlist(entry_date, rank);
 CREATE INDEX IF NOT EXISTS ix_events_at ON events(at);
@@ -267,19 +336,40 @@ def connect(path: Path) -> sqlite3.Connection:
 
 
 def init_db(path: Path) -> None:
-    with connect(path) as db:
+    with closing(connect(path)) as db:
         db.executescript(SCHEMA)
+        def add_column(table: str, name: str, definition: str) -> None:
+            try:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+            except sqlite3.OperationalError as exc:
+                # Worker and web may initialize against the same existing DB.
+                if "duplicate column name" not in str(exc).lower():
+                    raise
         for table in ("watchlist", "positions"):
             names = {r["name"] for r in db.execute(f"PRAGMA table_info({table})")}
             if "strategy_hash" not in names:
-                db.execute(f"ALTER TABLE {table} ADD COLUMN strategy_hash TEXT")
+                add_column(table, "strategy_hash", "TEXT")
         watch_names = {r["name"] for r in db.execute("PRAGMA table_info(watchlist)")}
         for name in ("candidate_count", "order_budget_cents"):
             if name not in watch_names:
-                db.execute(f"ALTER TABLE watchlist ADD COLUMN {name} INTEGER")
+                add_column("watchlist", name, "INTEGER")
+        for name, definition in (("real_strategy_id", "TEXT NOT NULL DEFAULT 'stable'"),
+                                 ("real_target_pct", "TEXT"),
+                                 ("real_no_partial", "INTEGER NOT NULL DEFAULT 0"),
+                                 ("real_status", "TEXT NOT NULL DEFAULT 'watching'")):
+            if name not in watch_names:
+                add_column("watchlist", name, definition)
+        db.execute("UPDATE watchlist SET real_target_pct=target_pct WHERE real_target_pct IS NULL AND real_no_partial=0")
+        real_names = {r["name"] for r in db.execute("PRAGMA table_info(real_positions)")}
+        for name, definition in (("strategy_id", "TEXT NOT NULL DEFAULT 'stable'"),
+                                 ("no_partial", "INTEGER NOT NULL DEFAULT 0")):
+            if name not in real_names:
+                add_column("real_positions", name, definition)
+        db.execute("INSERT OR IGNORE INTO real_strategy_schedule VALUES('1900-01-01','stable',?)",
+                   (now_utc_iso(),))
         alert_names = {r["name"] for r in db.execute("PRAGMA table_info(alerts)")}
         if "resolved_at" not in alert_names:
-            db.execute("ALTER TABLE alerts ADD COLUMN resolved_at TEXT")
+            add_column("alerts", "resolved_at", "TEXT")
         for column, definition in (
             ("action_status", "TEXT"), ("acted_at", "TEXT"),
             ("reference_price_cents", "INTEGER"),
@@ -287,7 +377,7 @@ def init_db(path: Path) -> None:
             ("action_kind", "TEXT"),
         ):
             if column not in alert_names:
-                db.execute(f"ALTER TABLE alerts ADD COLUMN {column} {definition}")
+                add_column("alerts", column, definition)
         db.execute("""
             CREATE INDEX IF NOT EXISTS ix_alerts_real_history
             ON alerts(action_status,acted_at DESC,id DESC)
@@ -307,7 +397,7 @@ def init_db(path: Path) -> None:
                   status,CASE WHEN watch_id IS NULL THEN 'user_managed' ELSE 'system' END,
                   created_at,closed_at,id FROM actual_positions
             """)
-            db.execute("INSERT INTO system_status VALUES('legacy_actual_import',?,?)",
+            db.execute("INSERT OR IGNORE INTO system_status VALUES('legacy_actual_import',?,?)",
                        (json.dumps({"done": True}), now_utc_iso()))
         # Old sell alerts have no frozen price, so they cannot be confirmed as proxy fills.
         db.execute("""
@@ -343,6 +433,21 @@ def init_db(path: Path) -> None:
                 ("1900-01-01", 100_000_000, 7_500_000, "0.00025", "5",
                  "0.00001", "0.0005", "0", now_utc_iso()),
             )
+        # One-time upgrade: honor the latest old-style reservation immediately
+        # and remove the future schedule so it cannot silently override it later.
+        with transaction(db):
+            if not db.execute("""
+                SELECT 1 FROM system_status WHERE key='real_strategy_immediate_migrated'
+            """).fetchone():
+                today = now_cn().date().isoformat()
+                pending = db.execute("""
+                    SELECT strategy_id FROM real_strategy_schedule
+                    WHERE effective_date>? ORDER BY created_at DESC,effective_date DESC LIMIT 1
+                """, (today,)).fetchone()
+                if pending:
+                    apply_real_strategy(db, today, pending["strategy_id"])
+                set_status(db, "real_strategy_immediate_migrated",
+                           {"migrated_pending": bool(pending)})
 
 
 @contextmanager
@@ -367,8 +472,23 @@ def setting_for(db: sqlite3.Connection, on_date: str) -> dict:
     return dict(row)
 
 
-def available_budget(db: sqlite3.Connection, on_date: str) -> int:
+def available_budget(db: sqlite3.Connection, on_date: str, account: str = "stable") -> int:
+    if account not in ("stable", "aggressive"):
+        raise ValueError(account)
     current = setting_for(db, on_date)
+    if account == "aggressive":
+        closed = db.execute(
+            "SELECT COALESCE(SUM(closed_pnl_cents),0) FROM aggressive_positions WHERE status='closed'"
+        ).fetchone()[0]
+        held = db.execute(
+            "SELECT COALESCE(SUM(reserved_cents),0) FROM aggressive_positions WHERE status='open'"
+        ).fetchone()[0]
+        pending = db.execute("""
+            SELECT COALESCE(SUM(o.reserved_cents),0) FROM aggressive_orders o
+            JOIN watchlist w ON w.id=o.watch_id
+            WHERE w.entry_date=? AND o.status='watching'
+        """, (on_date,)).fetchone()[0]
+        return int(100_000_000 + closed - held - pending)
     closed = db.execute(
         "SELECT COALESCE(SUM(closed_pnl_cents),0) FROM positions WHERE status='closed'"
     ).fetchone()[0]
@@ -382,10 +502,60 @@ def available_budget(db: sqlite3.Connection, on_date: str) -> int:
     return int(current["capital_cents"] + closed - held - pending)
 
 
-def cash_balance(db: sqlite3.Connection, on_date: str) -> int:
+def cash_balance(db: sqlite3.Connection, on_date: str, account: str = "stable") -> int:
+    if account not in ("stable", "aggressive"):
+        raise ValueError(account)
+    if account == "aggressive":
+        flows = db.execute("SELECT COALESCE(SUM(cash_delta_cents),0) FROM aggressive_legs").fetchone()[0]
+        return int(100_000_000 + flows)
     capital = setting_for(db, on_date)["capital_cents"]
     flows = db.execute("SELECT COALESCE(SUM(cash_delta_cents),0) FROM virtual_legs").fetchone()[0]
     return int(capital + flows)
+
+
+def real_strategy_for(db: sqlite3.Connection, on_date: str) -> str:
+    row = db.execute("""
+        SELECT strategy_id FROM real_strategy_schedule
+        WHERE effective_date<=? ORDER BY effective_date DESC LIMIT 1
+    """, (on_date,)).fetchone()
+    return str(row[0]) if row else "stable"
+
+
+def apply_real_strategy(db: sqlite3.Connection, day: str, strategy_id: str) -> int:
+    """Set the active real strategy and refresh today's untriggered buy plans.
+
+    Caller holds an immediate transaction. Existing alerts and positions remain frozen.
+    """
+    if strategy_id not in ("stable", "aggressive"):
+        raise ValueError(strategy_id)
+    db.execute("DELETE FROM real_strategy_schedule WHERE effective_date>?", (day,))
+    db.execute("""
+        INSERT INTO real_strategy_schedule(effective_date,strategy_id,created_at)
+        VALUES(?,?,?) ON CONFLICT(effective_date) DO UPDATE SET
+          strategy_id=excluded.strategy_id,created_at=excluded.created_at
+    """, (day, strategy_id, now_utc_iso()))
+    updated_plans = 0
+    for watch in db.execute("""
+        SELECT w.id,w.ret20,w.candidate_count FROM watchlist AS w
+        WHERE w.entry_date=? AND w.real_status='watching'
+          AND NOT EXISTS (
+            SELECT 1 FROM alerts AS a
+            WHERE a.event_key='real_buy:' || w.entry_date || ':' || w.code
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM real_positions AS p WHERE p.watch_id=w.id
+          )
+    """, (day,)).fetchall():
+        target, no_partial = exit_plan(
+            float(watch["ret20"]), watch["candidate_count"] or 0, strategy_id)
+        db.execute("""
+            UPDATE watchlist
+            SET real_strategy_id=?,real_target_pct=?,real_no_partial=?
+            WHERE id=?
+        """, (strategy_id, str(target) if target is not None else None,
+              int(no_partial), watch["id"]))
+        updated_plans += 1
+    return updated_plans
 
 
 def append_event(db: sqlite3.Connection, key: str, kind: str, code: str | None,

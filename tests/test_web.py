@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 
 from assistant.config import Config, SHANGHAI
-from assistant.storage import connect, init_db
-from assistant.web import _event_cursor, create_app
+from assistant.storage import connect, init_db, set_status
+from assistant.web import _event_cursor, _real_switch_allowed, create_app
 
 
 def test_event_stream_starts_at_latest_event_and_can_resume(tmp_path: Path):
@@ -23,6 +23,114 @@ def test_event_stream_starts_at_latest_event_and_can_resume(tmp_path: Path):
         assert _event_cursor(db, 0, None, False) == latest
         assert _event_cursor(db, 0, None, True) == 0
         assert _event_cursor(db, 0, str(latest - 1), False) == latest - 1
+
+
+def test_real_strategy_switch_is_immediate_and_intraday_is_locked(tmp_path: Path):
+    state = tmp_path / "state.sqlite"
+    init_db(state)
+    now = datetime.now(SHANGHAI)
+    tomorrow = (now.date() + timedelta(days=1)).isoformat()
+    with connect(state) as db:
+        set_status(db, "trading_calendar_today", {"date": now.date().isoformat(),
+                   "is_session": False, "next_session": tomorrow})
+        set_status(db, "worker_heartbeat", {"date": now.date().isoformat(),
+                   "observe_only": False})
+        db.execute("INSERT INTO real_strategy_schedule VALUES(?,?,?)",
+                   (tomorrow, "stable", now.isoformat()))
+    client = TestClient(create_app(Config(state_db=state, market_db=tmp_path / "unused.duckdb")))
+    alert_id = _real_buy_alert(state)
+    with connect(state) as db:
+        settings_id = db.execute("SELECT id FROM settings LIMIT 1").fetchone()[0]
+        db.execute("""
+            INSERT INTO watchlist(
+              entry_date,signal_date,code,rank,ret5,ret20,atr14,q_close,
+              raw_close,liquidity20,buy_limit_cents,target_pct,planned_shares,
+              candidate_count,settings_id,created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (now.date().isoformat(), now.date().isoformat(), "sh.600002",
+              2, -0.12, -0.11, 0.2, 10.0, 10.0, 200_000_000, 1000,
+              "0.08", 1000, 20, settings_id, now.isoformat()))
+    switched = client.post("/api/real/strategy", json={"strategy_id": "aggressive"})
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["effective_date"] == now.date().isoformat()
+    assert switched.json()["updated_plans"] == 1
+    board = client.get("/api/real").json()
+    assert board["strategy_id"] == "aggressive"
+    plans = {row["code"]: row for row in board["watchlist"]}
+    assert plans["sh.600002"]["strategy_id"] == "aggressive"
+    assert plans["sh.600002"]["no_partial"] == 1
+    assert plans["sh.600002"]["first_target_cents"] is None
+    assert plans["sh.600001"]["strategy_id"] == "stable"
+    assert plans["sh.600001"]["first_target_cents"] == 1100
+    with connect(state) as db:
+        assert db.execute("SELECT COUNT(*) FROM real_strategy_schedule WHERE effective_date>?",
+                          (now.date().isoformat(),)).fetchone()[0] == 0
+    assert client.post(f"/api/real/alerts/{alert_id}/complete").status_code == 200
+    assert client.get("/api/real").json()["positions"][0]["strategy_id"] == "stable"
+    reverted = client.post("/api/real/strategy", json={"strategy_id": "stable"})
+    assert reverted.status_code == 200, reverted.text
+    assert client.get("/api/real").json()["strategy_id"] == "stable"
+    with connect(state) as db:
+        row = db.execute("SELECT real_target_pct,real_no_partial FROM watchlist WHERE code='sh.600002'").fetchone()
+        assert row["real_target_pct"] == "0.08" and row["real_no_partial"] == 0
+    assert not _real_switch_allowed(datetime(2026, 10, 15, 11, 45, tzinfo=SHANGHAI), True)
+    assert _real_switch_allowed(datetime(2026, 10, 15, 15, 0, tzinfo=SHANGHAI), True)
+    assert client.post("/api/real/strategy", json={"strategy_id": "invalid"}).status_code == 400
+
+
+def test_old_pending_real_strategy_is_migrated_once(tmp_path: Path):
+    from assistant.storage import real_strategy_for
+
+    state = tmp_path / "state.sqlite"
+    init_db(state)
+    today = datetime.now(SHANGHAI).date().isoformat()
+    tomorrow = (datetime.now(SHANGHAI).date() + timedelta(days=1)).isoformat()
+    with connect(state) as db:
+        db.execute("DELETE FROM system_status WHERE key='real_strategy_immediate_migrated'")
+        db.execute("INSERT INTO real_strategy_schedule VALUES(?,?,?)",
+                   (tomorrow, "aggressive", datetime.now().isoformat()))
+    init_db(state)
+    with connect(state) as db:
+        assert real_strategy_for(db, today) == "aggressive"
+        assert db.execute("SELECT COUNT(*) FROM real_strategy_schedule WHERE effective_date>?",
+                          (today,)).fetchone()[0] == 0
+    init_db(state)
+    with connect(state) as db:
+        assert real_strategy_for(db, today) == "aggressive"
+
+
+def test_aggressive_real_buy_freezes_no_partial_exit(tmp_path: Path):
+    state = tmp_path / "state.sqlite"
+    init_db(state)
+    client = TestClient(create_app(Config(state_db=state, market_db=tmp_path / "unused.duckdb")))
+    alert_id = _real_buy_alert(state)
+    with connect(state) as db:
+        db.execute("""
+            UPDATE watchlist SET real_strategy_id='aggressive',
+              real_target_pct=NULL,real_no_partial=1
+        """)
+    watch = client.get("/api/real").json()["watchlist"][0]
+    assert watch["first_target_cents"] is None and watch["no_partial"] == 1
+    result = client.post(f"/api/real/alerts/{alert_id}/complete")
+    assert result.status_code == 200, result.text
+    position = client.get("/api/real").json()["positions"][0]
+    assert position["strategy_id"] == "aggressive"
+    assert position["target_pct"] is None and position["no_partial"] == 1
+    assert position["first_target_cents"] is None
+
+
+def test_market_index_api_reports_level_and_change(tmp_path: Path):
+    state = tmp_path / "state.sqlite"
+    init_db(state)
+    stamp = datetime.now(SHANGHAI).isoformat()
+    with connect(state) as db:
+        db.execute("""
+            INSERT INTO market_indices VALUES(?,?,?,?,?,?)
+        """, ("sh.000001", 385000, 380000, stamp, stamp, "test"))
+    client = TestClient(create_app(Config(state_db=state, market_db=tmp_path / "unused.duckdb")))
+    row = client.get("/api/market-indices").json()["indices"][0]
+    assert row["last_cents"] == 385000
+    assert abs(row["change_pct"] - (3850 / 3800 - 1)) < 1e-12
 
 
 def _real_buy_alert(state: Path, code: str = "sh.600001") -> int:

@@ -3,22 +3,25 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
+import time as runtime_time
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 from .config import Config, SHANGHAI, now_utc_iso, strategy_manifest
 from .market import MarketStore
 from .money import buy_cost, dec, planned_shares, sell_proceeds, yuan
-from .quotes import Quote, QuoteRouter
+from .quotes import PublicQuoteProvider, Quote, QuoteRouter
 from .storage import (alert, append_event, available_budget, cash_balance, connect, set_status,
-                      setting_for, transaction)
+                      real_strategy_for, setting_for, transaction)
 from .strategy import (SURGE_CANDIDATE_THRESHOLD, SURGE_ORDER_BUDGET_CENTS,
-                       buy_limit_cents, first_target_cents, initial_stop_cents,
+                       buy_limit_cents, exit_plan, first_target_cents, initial_stop_cents,
                        order_budget_cents,
                        stop_distance, strict_crossing, target_pct, trailing_cents,
                        virtual_exit)
 
 LOG = logging.getLogger(__name__)
+INDEX_CODES = ("sh.000001", "sz.399001", "sz.399006")
 
 
 def continuous_session(moment: datetime) -> bool:
@@ -39,8 +42,12 @@ class Engine:
         self.db = connect(config.state_db)
         self.strategy_hash, _ = strategy_manifest()
         self.quote_failures = 0
+        self._index_thread: threading.Thread | None = None
+        self._index_last_start = float("-inf")
 
     def close(self) -> None:
+        if self._index_thread is not None:
+            self._index_thread.join(timeout=6)
         self.db.close()
 
     def preopen(self, today: date, *, deadline: datetime | None = None,
@@ -80,10 +87,12 @@ class Engine:
             order_budget = order_budget_cents(settings["budget_cents"], candidate_count)
             published = []
             with transaction(self.db):
+                real_strategy = real_strategy_for(self.db, day)
                 for rank, candidate in enumerate(candidates[:5], 1):
                     code = candidate["code"]
-                    limit = buy_limit_cents(candidate["raw_close"])
-                    target = target_pct(float(candidate["ret20"]))
+                    limit = buy_limit_cents(candidate["raw_close"],
+                                            candidate["atr14"], candidate["q_close"])
+                    target = target_pct(float(candidate["ret20"]), candidate_count)
                     held = self.db.execute(
                         "SELECT id FROM positions WHERE code=? AND status='open'", (code,)
                     ).fetchone()
@@ -113,6 +122,16 @@ class Engine:
                           eligibility, "blocked" if held else "watching",
                           reason, settings["id"], self.strategy_hash, now_utc_iso()))
                     watch_id = self.db.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    real_target, real_no_partial = exit_plan(
+                        float(candidate["ret20"]), candidate_count, real_strategy)
+                    self.db.execute("""
+                        UPDATE watchlist SET real_strategy_id=?,real_target_pct=?,real_no_partial=?
+                        WHERE id=?
+                    """, (real_strategy, str(real_target) if real_target is not None else None,
+                          int(real_no_partial), watch_id))
+                    self._publish_aggressive_order(watch_id, day, code, limit,
+                                                   float(candidate["ret20"]), candidate_count,
+                                                   settings, order_budget)
                     append_event(self.db, f"watch:{day}:{code}", "watch_published",
                                  code, watch_id, None,
                                  {"rank": rank, "limit_cents": limit,
@@ -152,7 +171,8 @@ class Engine:
     def _publish_focus(self, day: str, signal_day: str, candidates: list[dict]) -> int:
         for rank, candidate in enumerate(candidates[5:], 6):
             code = candidate["code"]
-            limit = buy_limit_cents(candidate["raw_close"])
+            limit = buy_limit_cents(candidate["raw_close"],
+                                    candidate["atr14"], candidate["q_close"])
             self.db.execute("""
                 INSERT OR IGNORE INTO focus_watchlist(
                   entry_date,signal_date,code,rank,ret5,ret20,atr14,q_close,
@@ -171,6 +191,31 @@ class Engine:
     def ensure_focus(self, today: date) -> int:
         return 0
 
+    def _publish_aggressive_order(self, watch_id: int, day: str, code: str,
+                                  limit: int, ret20: float, candidate_count: int,
+                                  settings: dict, order_budget: int) -> None:
+        held = self.db.execute(
+            "SELECT 1 FROM aggressive_positions WHERE code=? AND status='open'", (code,)
+        ).fetchone()
+        shares = planned_shares(yuan(limit), order_budget, settings)
+        budget_left = available_budget(self.db, day, "aggressive")
+        if held:
+            eligibility, reserve, reason = "held", 0, "激进盘已有同股持仓"
+        elif shares < 100:
+            eligibility, reserve, reason = "lot_too_small", 0, "预算不足购买一手"
+        elif budget_left < order_budget:
+            eligibility, reserve, reason = "cash_insufficient", 0, "激进盘资金不足"
+        else:
+            eligibility, reserve, reason = "funded", order_budget, None
+        target, no_partial = exit_plan(ret20, candidate_count, "aggressive")
+        self.db.execute("""
+            INSERT INTO aggressive_orders(watch_id,planned_shares,reserved_cents,
+              order_budget_cents,target_pct,no_partial,eligibility,status,block_reason)
+            VALUES(?,?,?,?,?,?,?,?,?)
+        """, (watch_id, shares, reserve, order_budget,
+              str(target) if target is not None else None, int(no_partial),
+              eligibility, "blocked" if held else "watching", reason))
+
     def monitored_codes(self, today: date) -> list[str]:
         watch = self.db.execute(
             "SELECT code FROM watchlist WHERE entry_date=? AND status='watching' ORDER BY rank",
@@ -179,10 +224,18 @@ class Engine:
         virtual = self.db.execute(
             "SELECT code FROM positions WHERE status='open'"
         ).fetchall()
+        aggressive = self.db.execute(
+            "SELECT code FROM aggressive_positions WHERE status='open'"
+        ).fetchall()
         actual = self.db.execute(
             "SELECT code FROM real_positions WHERE status='open' AND management_mode='system'"
         ).fetchall()
-        return list(dict.fromkeys([r[0] for r in [*watch, *virtual, *actual]]))
+        real_watch = self.db.execute(
+            "SELECT code FROM watchlist WHERE entry_date=? AND real_status='watching' ORDER BY rank",
+            (today.isoformat(),),
+        ).fetchall()
+        return list(dict.fromkeys([r[0] for r in [*watch, *real_watch, *virtual,
+                                                 *aggressive, *actual]]))
 
     def poll(self, today: date) -> dict:
         if self.router is None:
@@ -218,7 +271,55 @@ class Engine:
                                  {"requested": len(codes), "received": len(quotes)})
         for quote in quotes.values():
             self.process_quote(quote, allow_triggers=not self.config.observe_only)
+        self._schedule_index_update(today)
         return {"codes": len(codes), "quotes": len(quotes), **health}
+
+    def _schedule_index_update(self, today: date, interval_seconds: float = 10) -> None:
+        if (self._index_thread is not None and self._index_thread.is_alive()) or (
+                runtime_time.monotonic() - self._index_last_start < interval_seconds):
+            return
+        self._index_last_start = runtime_time.monotonic()
+        self._index_thread = threading.Thread(target=self._update_indices,
+                                              args=(today,), name="index-quotes",
+                                              daemon=True)
+        self._index_thread.start()
+
+    def _update_indices(self, today: date) -> None:
+        # Index display is intentionally separate from trading quote health.
+        fetched = {}
+        try:
+            fetched = PublicQuoteProvider("tencent").fetch(
+                list(INDEX_CODES), self.config.quote_timeout_seconds)
+        except Exception as exc:
+            LOG.debug("Tencent index quote refresh failed: %s", exc)
+        missing = [code for code in INDEX_CODES if code not in fetched]
+        if missing:
+            try:
+                fetched.update(PublicQuoteProvider("sina").fetch(
+                    missing, self.config.quote_timeout_seconds))
+            except Exception as exc:
+                LOG.debug("Sina index quote refresh failed: %s", exc)
+        if not fetched:
+            return
+        with connect(self.config.state_db) as index_db, transaction(index_db):
+            for code in INDEX_CODES:
+                quote = fetched.get(code)
+                if (quote is None or quote.source_time.date() > today
+                        or quote.last_cents <= 0 or quote.preclose_cents <= 0):
+                    continue
+                index_db.execute("""
+                    INSERT INTO market_indices(code,last_cents,preclose_cents,
+                      source_time,received_at,provider) VALUES(?,?,?,?,?,?)
+                    ON CONFLICT(code) DO UPDATE SET
+                      last_cents=excluded.last_cents,
+                      preclose_cents=excluded.preclose_cents,
+                      source_time=excluded.source_time,
+                      received_at=excluded.received_at,
+                      provider=excluded.provider
+                    WHERE excluded.source_time>=market_indices.source_time
+                """, (code, quote.last_cents, quote.preclose_cents,
+                      quote.source_time.isoformat(), quote.received_at.isoformat(),
+                      quote.provider))
 
     def process_quote(self, quote: Quote, *, allow_triggers: bool) -> None:
         day = quote.source_time.date()
@@ -251,21 +352,31 @@ class Engine:
         if not health:
             return
         self._exclude_unbuyable_watch(quote)
+        self._exclude_unbuyable_aggressive(quote)
         if not allow_triggers:
             return
         self._real_entry_quote(quote)
         self._entry_quote(quote)
+        self._aggressive_entry_quote(quote)
         self._exit_quote(quote)
+        self._exit_quote(quote, account="aggressive")
         self._actual_sell_signal(quote)
 
     def _exclude_unbuyable_watch(self, quote: Quote) -> None:
         day = quote.source_time.date().isoformat()
         with transaction(self.db):
             watch = self.db.execute(
-                "SELECT * FROM watchlist WHERE entry_date=? AND code=? AND status='watching'",
+                "SELECT * FROM watchlist WHERE entry_date=? AND code=?",
                 (day, quote.code),
             ).fetchone()
             if watch is None:
+                return
+            if quote.open_cents <= watch["buy_limit_cents"]:
+                self.db.execute("""
+                    UPDATE watchlist SET real_status='blocked' WHERE id=?
+                      AND real_status='watching'
+                """, (watch["id"],))
+            if watch["status"] != "watching":
                 return
             held = self.db.execute(
                 "SELECT 1 FROM positions WHERE code=? AND status='open'", (quote.code,),
@@ -285,6 +396,33 @@ class Engine:
                          {"reason": reason, "open_cents": quote.open_cents,
                           "limit_cents": watch["buy_limit_cents"],
                           "source_time": quote.source_time.isoformat()})
+
+    def _exclude_unbuyable_aggressive(self, quote: Quote) -> None:
+        day = quote.source_time.date().isoformat()
+        with transaction(self.db):
+            row = self.db.execute("""
+                SELECT o.watch_id,w.buy_limit_cents FROM aggressive_orders o
+                JOIN watchlist w ON w.id=o.watch_id
+                WHERE w.entry_date=? AND w.code=? AND o.status='watching'
+            """, (day, quote.code)).fetchone()
+            if row is None:
+                return
+            held = self.db.execute(
+                "SELECT 1 FROM aggressive_positions WHERE code=? AND status='open'",
+                (quote.code,)).fetchone()
+            if held:
+                reason = "激进盘已有同股持仓"
+            elif quote.open_cents <= row["buy_limit_cents"]:
+                reason = "开盘价不高于限价，严格穿越条件无法满足"
+            else:
+                return
+            self.db.execute("""
+                UPDATE aggressive_orders SET status='blocked',block_reason=?,reserved_cents=0
+                WHERE watch_id=?
+            """, (reason, row["watch_id"]))
+            append_event(self.db, f"aggressive_excluded:{day}:{quote.code}",
+                         "aggressive_entry_excluded", quote.code, row["watch_id"], None,
+                         {"reason": reason, "open_cents": quote.open_cents})
 
     def _focus_quote(self, quote: Quote) -> None:
         day = quote.source_time.date().isoformat()
@@ -333,7 +471,7 @@ class Engine:
             "SELECT * FROM watchlist WHERE entry_date=? AND code=?",
             (day, quote.code),
         ).fetchone()
-        if (watch is None or watch["status"] in ("blocked", "expired")
+        if (watch is None or watch["real_status"] != "watching"
                 or not strict_crossing(quote.open_cents, quote.last_cents,
                                        watch["buy_limit_cents"])):
             return
@@ -477,7 +615,88 @@ class Engine:
             alert(self.db, key, "virtual_buy", "action", "买入价已触发",
                   f"虚拟买入 {shares} 股；请在券商端核对行情、资金及委托成交", quote.code)
 
-    def _update_peak(self, position: sqlite3.Row, today: date) -> tuple[int, int]:
+    def _aggressive_entry_quote(self, quote: Quote) -> None:
+        day = quote.source_time.date().isoformat()
+        with transaction(self.db):
+            row = self.db.execute("""
+                SELECT w.*,o.planned_shares AS aggressive_shares,
+                  o.reserved_cents AS aggressive_reserved,
+                  o.target_pct AS aggressive_target,
+                  o.no_partial AS aggressive_no_partial,
+                  o.eligibility AS aggressive_eligibility
+                FROM watchlist w JOIN aggressive_orders o ON o.watch_id=w.id
+                WHERE w.entry_date=? AND w.code=? AND o.status='watching'
+            """, (day, quote.code)).fetchone()
+            if row is None or not strict_crossing(
+                    quote.open_cents, quote.last_cents, row["buy_limit_cents"]):
+                return
+            key = f"aggressive_buy:{day}:{quote.code}"
+            if not eligible_name(quote.name) or quote.preclose_cents <= 0 or abs(
+                    quote.preclose_cents / (float(row["raw_close"]) * 100) - 1) > .02:
+                reason = "ST 名称或昨收参考价待核对"
+                self.db.execute("""
+                    UPDATE aggressive_orders SET status='blocked',block_reason=?,reserved_cents=0
+                    WHERE watch_id=?
+                """, (reason, row["id"]))
+                append_event(self.db, key, "aggressive_entry_blocked", quote.code,
+                             row["id"], None, {"reason": reason})
+                return
+            if row["aggressive_eligibility"] != "funded":
+                self.db.execute("""
+                    UPDATE aggressive_orders SET status='opportunity_only',reserved_cents=0,
+                      triggered_at=? WHERE watch_id=?
+                """, (quote.source_time.isoformat(), row["id"]))
+                return
+            settings = dict(self.db.execute(
+                "SELECT * FROM settings WHERE id=?", (row["settings_id"],)
+            ).fetchone())
+            shares = row["aggressive_shares"]
+            cost, fee = buy_cost(yuan(row["buy_limit_cents"]), shares,
+                                 dec(settings["commission_rate"]),
+                                 dec(settings["minimum_commission"]),
+                                 dec(settings["transfer_rate"]),
+                                 dec(settings["slippage_rate"]))
+            duplicate = self.db.execute(
+                "SELECT 1 FROM aggressive_positions WHERE code=? AND status='open'",
+                (quote.code,)).fetchone()
+            if duplicate or cash_balance(self.db, day, "aggressive") < cost:
+                self.db.execute("""
+                    UPDATE aggressive_orders SET status='opportunity_only',reserved_cents=0,
+                      triggered_at=? WHERE watch_id=?
+                """, (quote.source_time.isoformat(), row["id"]))
+                return
+            distance = stop_distance(row["atr14"], row["q_close"],
+                                     row["buy_limit_cents"], row["raw_close"])
+            stop = initial_stop_cents(row["buy_limit_cents"], distance)
+            self.db.execute("""
+                INSERT INTO aggressive_positions(
+                  watch_id,code,entry_date,entry_price_cents,bought_shares,remaining_shares,
+                  target_pct,no_partial,initial_stop_cents,prior_peak_cents,
+                  peak_asof_date,reserved_cents,buy_cash_cents,settings_id,
+                  strategy_hash,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (row["id"], quote.code, day, row["buy_limit_cents"], shares, shares,
+                  row["aggressive_target"], row["aggressive_no_partial"], stop,
+                  row["buy_limit_cents"], day, row["aggressive_reserved"], cost,
+                  row["settings_id"], row["strategy_hash"], now_utc_iso()))
+            position_id = self.db.execute("SELECT last_insert_rowid()").fetchone()[0]
+            self.db.execute("""
+                INSERT INTO aggressive_legs(position_id,side,shares,gross_price_cents,
+                  cash_delta_cents,fee_cents,quote_event_key,reason,at)
+                VALUES(?,?,?,?,?,?,?,?,?)
+            """, (position_id, "buy", shares, row["buy_limit_cents"], -cost,
+                  fee, key, "strict_crossing", quote.source_time.isoformat()))
+            self.db.execute("""
+                UPDATE aggressive_orders SET status='virtual_bought',reserved_cents=0,
+                  triggered_at=? WHERE watch_id=?
+            """, (quote.source_time.isoformat(), row["id"]))
+            append_event(self.db, key, "aggressive_entry_filled", quote.code,
+                         row["id"], position_id,
+                         {"shares": shares, "cost_cents": cost, "no_partial":
+                          bool(row["aggressive_no_partial"])})
+
+    def _update_peak(self, position: sqlite3.Row, today: date,
+                     account: str = "stable") -> tuple[int, int]:
         hold = self.market.sessions_since(date.fromisoformat(position["entry_date"]), today)
         peak = int(position["prior_peak_cents"])
         asof = date.fromisoformat(position["peak_asof_date"])
@@ -492,28 +711,34 @@ class Engine:
         trail = int(position["trailing_line_cents"])
         if position["partial_done"]:
             trail = trailing_cents(position["entry_price_cents"], peak, trail)
-        self.db.execute("""
-            UPDATE positions SET hold_days=?,prior_peak_cents=?,peak_asof_date=?,
+        table = "positions" if account == "stable" else "aggressive_positions"
+        self.db.execute(f"""
+            UPDATE {table} SET hold_days=?,prior_peak_cents=?,peak_asof_date=?,
               trailing_line_cents=? WHERE id=?
         """, (hold, peak, asof.isoformat(), trail, position["id"]))
         return hold, trail
 
-    def _exit_quote(self, quote: Quote) -> None:
+    def _exit_quote(self, quote: Quote, account: str = "stable") -> None:
+        if account not in ("stable", "aggressive"):
+            raise ValueError(account)
+        table = "positions" if account == "stable" else "aggressive_positions"
+        legs = "virtual_legs" if account == "stable" else "aggressive_legs"
         positions = self.db.execute(
-            "SELECT id FROM positions WHERE code=? AND status='open'", (quote.code,)
+            f"SELECT id FROM {table} WHERE code=? AND status='open'", (quote.code,)
         ).fetchall()
         for item in positions:
             with transaction(self.db):
                 position = self.db.execute(
-                    "SELECT * FROM positions WHERE id=? AND status='open'", (item["id"],)
+                    f"SELECT * FROM {table} WHERE id=? AND status='open'", (item["id"],)
                 ).fetchone()
                 if position is None:
                     continue
                 today = quote.source_time.date()
                 try:
-                    hold, trail = self._update_peak(position, today)
+                    hold, trail = self._update_peak(position, today, account)
                 except Exception as exc:
-                    alert(self.db, f"peak_missing:{today}:{position['id']}",
+                    alert(self.db, (f"peak_missing:{today}:{position['id']}" if account == "stable"
+                                    else f"aggressive:peak_missing:{today}:{position['id']}"),
                           "data_failure", "critical", "卖出阈值待核对",
                           str(exc), quote.code)
                     continue
@@ -523,7 +748,8 @@ class Engine:
                 previous_close = self.market.raw_close(quote.code, previous)
                 if (not previous_close or quote.preclose_cents <= 0
                     or abs(quote.preclose_cents / (previous_close * 100) - 1) > 0.02):
-                    alert(self.db, f"action_review:{today}:{position['id']}",
+                    alert(self.db, (f"action_review:{today}:{position['id']}" if account == "stable"
+                                    else f"aggressive:action_review:{today}:{position['id']}"),
                           "action_review", "critical", "持仓公司行为待核对",
                           "昨收参考价相对上一交易日原始收盘价异常，暂停自动卖出",
                           quote.code)
@@ -537,6 +763,7 @@ class Engine:
                     trailing_line=trail, partial_done=bool(position["partial_done"]),
                     hold_days=hold, open_cents=quote.open_cents,
                     last_cents=quote.last_cents, is_opening_snapshot=opening,
+                    no_partial=bool(position["no_partial"]) if account == "aggressive" else False,
                 )
                 if decision is None:
                     continue
@@ -550,15 +777,16 @@ class Engine:
                     dec(settings["transfer_rate"]), dec(settings["stamp_rate"]),
                     dec(settings["slippage_rate"]),
                 )
-                event_key = f"sell:{position['id']}:{'partial' if decision.kind == 'partial_profit' else 'final'}"
+                event_key = ("sell:" if account == "stable" else "aggressive:sell:") + (
+                    f"{position['id']}:{'partial' if decision.kind == 'partial_profit' else 'final'}")
                 already = self.db.execute(
-                    "SELECT 1 FROM virtual_legs WHERE position_id=? AND quote_event_key=?",
+                    f"SELECT 1 FROM {legs} WHERE position_id=? AND quote_event_key=?",
                     (position["id"], event_key),
                 ).fetchone()
                 if already:
                     continue
-                self.db.execute("""
-                    INSERT INTO virtual_legs(
+                self.db.execute(f"""
+                    INSERT INTO {legs}(
                       position_id,side,shares,gross_price_cents,cash_delta_cents,
                       fee_cents,quote_event_key,reason,at
                     ) VALUES(?,?,?,?,?,?,?,?,?)
@@ -568,28 +796,30 @@ class Engine:
                 remaining = position["remaining_shares"] - decision.shares
                 if remaining == 0:
                     net = self.db.execute(
-                        "SELECT SUM(cash_delta_cents) FROM virtual_legs WHERE position_id=?",
+                        f"SELECT SUM(cash_delta_cents) FROM {legs} WHERE position_id=?",
                         (position["id"],),
                     ).fetchone()[0]
-                    self.db.execute("""
-                        UPDATE positions SET remaining_shares=0,status='closed',
+                    self.db.execute(f"""
+                        UPDATE {table} SET remaining_shares=0,status='closed',
                           reserved_cents=0,closed_pnl_cents=?,closed_at=?,
                           hold_days=? WHERE id=?
                     """, (net, quote.source_time.isoformat(), hold, position["id"]))
                 else:
-                    self.db.execute("""
-                        UPDATE positions SET remaining_shares=?,partial_done=1,
+                    self.db.execute(f"""
+                        UPDATE {table} SET remaining_shares=?,partial_done=1,
                           hold_days=? WHERE id=?
                     """, (remaining, hold, position["id"]))
-                append_event(self.db, event_key, "virtual_exit",
+                append_event(self.db, event_key,
+                             "virtual_exit" if account == "stable" else "aggressive_exit",
                              quote.code, position["watch_id"], position["id"],
                              {"reason": decision.kind, "shares": decision.shares,
                               "proxy_price_cents": proxy_cents,
                               "fee_cents": fee, "cash_in_cents": proceeds,
                               "source_time": quote.source_time.isoformat()})
-                alert(self.db, event_key, "virtual_sell", "action", "卖出条件已触发",
-                      f"{decision.kind}：虚拟卖出 {decision.shares} 股；请在券商端核对实际成交",
-                      quote.code)
+                if account == "stable":
+                    alert(self.db, event_key, "virtual_sell", "action", "卖出条件已触发",
+                          f"{decision.kind}：虚拟卖出 {decision.shares} 股；请在券商端核对实际成交",
+                          quote.code)
 
     def _actual_sell_signal(self, quote: Quote) -> None:
         rows = self.db.execute("""
@@ -645,6 +875,7 @@ class Engine:
                     hold_days=hold, open_cents=quote.open_cents,
                     last_cents=quote.last_cents,
                     is_opening_snapshot=time(9, 30) <= quote.source_time.time() <= time(9, 30, 15),
+                    no_partial=bool(pos["no_partial"]),
                 )
                 if decision is None:
                     continue
@@ -661,12 +892,21 @@ class Engine:
 
     def end_day(self, today: date) -> dict:
         with transaction(self.db):
+            self.db.execute("""
+                UPDATE aggressive_orders SET status='expired',reserved_cents=0
+                WHERE watch_id IN (SELECT id FROM watchlist WHERE entry_date=?)
+                  AND status='watching'
+            """, (today.isoformat(),))
             rows = self.db.execute("""
                 SELECT id,code FROM watchlist WHERE entry_date=? AND status='watching'
             """, (today.isoformat(),)).fetchall()
             self.db.execute("""
                 UPDATE watchlist SET status='expired',reserved_cents=0
                 WHERE entry_date=? AND status='watching'
+            """, (today.isoformat(),))
+            self.db.execute("""
+                UPDATE watchlist SET real_status='expired'
+                WHERE entry_date=? AND real_status='watching'
             """, (today.isoformat(),))
             for row in rows:
                 append_event(self.db, f"expired:{today}:{row['code']}",

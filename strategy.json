@@ -1,13 +1,15 @@
 {
   "id": "oversold_limit_ret20_exit_switch_hold20",
-  "version_date": "2026-10-12",
-  "version": "surge_top5_200k",
+  "version_date": "2026-10-15",
+  "version": "dual_virtual_dynamic_exit_20261015",
   "backtest_revision": "2026-10-12_open_partial_same_day_stop",
   "status": "selected_research_candidate_for_manual_forward_validation",
   "live_ready": false,
   "execution_mode": "single_account_manual_orders",
   "runtime_surfaces": {
     "virtual": {
+      "accounts": ["stable", "aggressive"],
+      "independent_cash_positions_and_history": true,
       "initial_capital_cny": 1000000,
       "normal_order_budget_cny": 75000,
       "surge_order_budget_cny": 200000,
@@ -23,7 +25,8 @@
       "maximum_ranked_stocks_per_day": 5,
       "focus_watchlist_enabled": false,
       "order_entry": "manual",
-      "actual_cash_and_fills": "recorded manually"
+      "actual_cash_and_fills": "reminder price confirmed manually",
+      "strategy_switch": "outside trading hours, effective next trading session for new plans only"
     }
   },
   "universe": {
@@ -43,7 +46,8 @@
     "surge_count_basis": "all eligible signal-day candidates before top-five ranking"
   },
   "entry_next_market_day": {
-    "buy_limit_cny": "floor(signal_raw_close * 0.96 * 100) / 100",
+    "buy_discount": "0.0225 + 0.25 * signal_ATR14 / signal_adjusted_close",
+    "buy_limit_cny": "floor(signal_raw_close * (1 - buy_discount) * 100) / 100",
     "order_validity": "entry day only",
     "backtest_fill_scenarios": ["strict_crossing", "gap_allowed"],
     "cancel_if_reference_price_change_exceeds": 0.02,
@@ -67,8 +71,10 @@
     "first_partial_target": {
       "feature": "signal_adjusted_close / adjusted_close_20_valid_sessions_earlier - 1",
       "threshold_at_or_below": -0.10,
-      "target_if_true": 0.10,
+      "stable_target_if_true_and_candidate_count_at_least_50": 0.10,
+      "stable_target_if_true_and_candidate_count_below_50": 0.08,
       "target_if_false": 0.01,
+      "aggressive_deep_group": "no first partial sale; initial stop and 20-session expiry remain",
       "reference": "gross_simulated_entry_price",
       "fraction_to_sell": 0.5,
       "only_after_entry_day": true
@@ -84,13 +90,13 @@
     "same_day_stop_profit_ambiguity": "stop_first"
   },
   "backtest_cost_assumptions": {
-    "commission_each_side": 0.0003,
+    "commission_each_side": 0.00025,
     "minimum_commission_cny_each_order": 5,
     "transfer_fee_each_side": 0.00001,
     "sell_stamp_tax": 0.0005,
     "one_way_slippage_scenarios": [0, 0.001, 0.003]
   },
-  "source_backtest": "same_day_partial_recalc/results.csv and same_day_partial_recalc/RECALC_REPORT.md; high_signal_capacity retained as pre-correction archive",
+  "source_backtest": "atr_entry_grid/RESEARCH_REPORT.md in research workspace; historical windows are not independent out-of-sample data",
   "complete_scheme": "CURRENT_STRATEGY.md",
   "independent_out_of_sample_verified": false
 }

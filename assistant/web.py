@@ -5,6 +5,7 @@ import json
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -14,8 +15,9 @@ from starlette.templating import Jinja2Templates
 
 from .config import Config, SHANGHAI, now_utc_iso
 from .money import cents
-from .storage import (alert, append_event, available_budget, cash_balance,
-                      connect, next_effective_calendar_date, setting_for, transaction)
+from .storage import (alert, append_event, apply_real_strategy, available_budget, cash_balance,
+                      connect, next_effective_calendar_date, real_strategy_for,
+                      setting_for, transaction)
 from .strategy import first_target_cents, initial_stop_cents, stop_distance
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +55,23 @@ class SettingsIn(BaseModel):
     transfer_rate: Decimal = Field(ge=0)
     stamp_rate: Decimal = Field(ge=0)
     slippage_rate: Decimal = Field(ge=0)
+
+
+class RealStrategyIn(BaseModel):
+    strategy_id: str
+
+
+def _virtual_tables(account: str) -> tuple[str, str]:
+    if account == "stable":
+        return "positions", "virtual_legs"
+    if account == "aggressive":
+        return "aggressive_positions", "aggressive_legs"
+    raise HTTPException(400, "Unknown virtual account")
+
+
+def _real_switch_allowed(now: datetime, is_session: bool) -> bool:
+    clock = (now.hour, now.minute)
+    return not (is_session and (9, 30) <= clock < (15, 0))
 
 
 def create_app(config: Config) -> FastAPI:
@@ -156,31 +175,35 @@ def create_app(config: Config) -> FastAPI:
         return []
 
     @app.get("/api/virtual")
-    def virtual_board():
+    def virtual_board(account: str = "stable"):
+        positions_table, legs_table = _virtual_tables(account)
         day = datetime.now(SHANGHAI).date().isoformat()
         with connect(config.state_db) as db:
             setting = setting_for(db, day)
-            positions = _rows(db, """
-                SELECT * FROM positions WHERE status='open' ORDER BY entry_date,id
+            if account == "aggressive":
+                setting = {**setting, "capital_cents": 100_000_000}
+            positions = _rows(db, f"""
+                SELECT * FROM {positions_table} WHERE status='open' ORDER BY entry_date,id
             """)
-            quote_rows = {row["code"]: row for row in _rows(db, """
+            quote_rows = {row["code"]: row for row in _rows(db, f"""
                 SELECT q.code,q.last_cents,q.source_time,q.healthy FROM quotes AS q
-                WHERE q.code IN (SELECT code FROM positions WHERE status='open')
+                WHERE q.code IN (SELECT code FROM {positions_table} WHERE status='open')
             """)}
             quotes = {code: row["last_cents"] for code, row in quote_rows.items()
                       if row["last_cents"] > 0}
-            trade_flows = {row["position_id"]: row for row in _rows(db, """
+            trade_flows = {row["position_id"]: row for row in _rows(db, f"""
                 SELECT l.position_id,
                   SUM(CASE WHEN l.side='sell' THEN l.cash_delta_cents ELSE 0 END)
                     AS sold_proceeds_cents,
                   MIN(CASE WHEN l.side='buy' THEN l.at END) AS buy_time
-                FROM virtual_legs AS l
-                JOIN positions AS p ON p.id=l.position_id
+                FROM {legs_table} AS l
+                JOIN {positions_table} AS p ON p.id=l.position_id
                 WHERE p.status='open' GROUP BY l.position_id
             """)}
             for position in positions:
                 quote = quote_rows.get(position["code"])
                 flow = trade_flows.get(position["id"])
+                position["buy_time"] = flow["buy_time"] if flow else None
                 valid_quote = (quote and quote["healthy"] and quote["last_cents"] > 0
                                and flow and flow["buy_time"]
                                and datetime.fromisoformat(quote["source_time"])
@@ -197,17 +220,27 @@ def create_app(config: Config) -> FastAPI:
             market_value = sum(position["remaining_shares"] *
                                quotes.get(position["code"], position["entry_price_cents"])
                                for position in positions)
-            cash = cash_balance(db, day)
+            cash = cash_balance(db, day, account)
             watchlist = _rows(db, """
                 SELECT * FROM watchlist WHERE entry_date=? ORDER BY rank
             """, (day,))
+            if account == "aggressive":
+                orders = {row["watch_id"]: row for row in _rows(db, """
+                    SELECT * FROM aggressive_orders
+                    WHERE watch_id IN (SELECT id FROM watchlist WHERE entry_date=?)
+                """, (day,))}
+                watchlist = [dict(w, **{k: value for k, value in orders[w["id"]].items()
+                                       if k != "watch_id"}) for w in watchlist
+                             if w["id"] in orders]
             for watch in watchlist:
-                watch["first_target_cents"] = first_target_cents(
+                watch["first_target_cents"] = (first_target_cents(
                     watch["buy_limit_cents"], watch["target_pct"])
+                    if watch["target_pct"] is not None else None)
             return {
+                "account": account,
                 "date": day,
                 "capital_cents": setting["capital_cents"],
-                "available_budget_cents": available_budget(db, day),
+                "available_budget_cents": available_budget(db, day, account),
                 "cash_cents": cash,
                 "positions_market_value_cents": market_value,
                 "total_asset_cents": cash + market_value,
@@ -223,13 +256,28 @@ def create_app(config: Config) -> FastAPI:
                       AND event_key NOT LIKE 'actual_%'
                       AND kind != 'focus_triggered'
                     ORDER BY id DESC LIMIT 100
-                """),
+                """) if account == "stable" else [],
             }
 
     @app.get("/api/real")
     def real_board():
-        day = datetime.now(SHANGHAI).date().isoformat()
+        now = datetime.now(SHANGHAI)
+        day = now.date().isoformat()
         with connect(config.state_db) as db:
+            calendar_row = db.execute("""
+                SELECT value,updated_at FROM system_status
+                WHERE key='trading_calendar_today'
+            """).fetchone()
+            heartbeat_row = db.execute("""
+                SELECT updated_at FROM system_status WHERE key='worker_heartbeat'
+            """).fetchone()
+            calendar = json.loads(calendar_row["value"]) if calendar_row else {}
+            calendar_fresh = bool(calendar_row and calendar.get("date") == day and
+                heartbeat_row and
+                (datetime.fromisoformat(now_utc_iso()) -
+                 datetime.fromisoformat(heartbeat_row["updated_at"])).total_seconds() <= 35)
+            can_switch = calendar_fresh and _real_switch_allowed(
+                now, bool(calendar.get("is_session")))
             positions = _rows(db, """
                 SELECT p.*,
                   (SELECT a.created_at FROM alerts AS a
@@ -242,12 +290,16 @@ def create_app(config: Config) -> FastAPI:
             for position in positions:
                 position["first_target_cents"] = (
                     first_target_cents(position["entry_price_cents"], position["target_pct"])
-                    if position["target_pct"] is not None else None
+                    if position["target_pct"] is not None and not position["no_partial"] else None
                 )
             watchlist = _rows(db, """
                     SELECT w.id,w.entry_date,w.signal_date,w.code,w.rank,
-                      w.ret5,w.ret20,w.buy_limit_cents,w.target_pct,
+                      w.ret5,w.ret20,w.buy_limit_cents,
+                      CASE WHEN w.real_no_partial THEN NULL
+                           ELSE COALESCE(w.real_target_pct,w.target_pct) END AS target_pct,
+                      w.real_no_partial AS no_partial,w.real_strategy_id AS strategy_id,
                       w.planned_shares,w.candidate_count,w.status AS watch_status,
+                      w.real_status,
                       COALESCE(w.order_budget_cents,s.budget_cents) AS order_budget_cents,
                       e.at AS buy_signal_at,a.action_status AS buy_action_status
                     FROM watchlist AS w JOIN settings AS s ON s.id=w.settings_id
@@ -257,8 +309,9 @@ def create_app(config: Config) -> FastAPI:
                     WHERE w.entry_date=? ORDER BY w.rank
                 """, (day,))
             for watch in watchlist:
-                watch["first_target_cents"] = first_target_cents(
+                watch["first_target_cents"] = (first_target_cents(
                     watch["buy_limit_cents"], watch["target_pct"])
+                    if watch["target_pct"] is not None and not watch["no_partial"] else None)
             pending_filter = """
                 (kind='real_buy' AND action_status='pending'
                  AND substr(event_key,10,10)=?)
@@ -272,6 +325,8 @@ def create_app(config: Config) -> FastAPI:
             ).fetchone()[0]
             return {
                 "date": day,
+                "can_switch_strategy": can_switch,
+                "strategy_id": real_strategy_for(db, day),
                 "watchlist": watchlist,
                 "positions": positions,
                 "pending_alert_count": pending_count,
@@ -287,12 +342,75 @@ def create_app(config: Config) -> FastAPI:
         with connect(config.state_db) as db:
             return _rows(db, "SELECT * FROM quotes ORDER BY code")
 
+    @app.get("/api/market-indices")
+    def market_indices():
+        now = datetime.now(SHANGHAI)
+        with connect(config.state_db) as db:
+            rows = _rows(db, "SELECT * FROM market_indices ORDER BY code")
+            calendar_row = db.execute("""
+                SELECT value FROM system_status WHERE key='trading_calendar_today'
+            """).fetchone()
+        calendar = json.loads(calendar_row[0]) if calendar_row else {}
+        is_session = calendar.get("date") == now.date().isoformat() and calendar.get("is_session")
+        if not is_session:
+            market_mode = "休市"
+        elif (now.hour, now.minute) < (9, 30):
+            market_mode = "盘前"
+        elif (now.hour, now.minute) < (11, 30) or (13, 0) <= (now.hour, now.minute) < (15, 0):
+            market_mode = "交易中"
+        elif (now.hour, now.minute) < (13, 0):
+            market_mode = "午间休市"
+        else:
+            market_mode = "已收盘"
+        for row in rows:
+            seen = datetime.fromisoformat(row["source_time"])
+            row["stale"] = (seen.date() != now.date() or
+                            (market_mode == "交易中" and
+                             (now - seen).total_seconds() > 120))
+            row["change_pct"] = (row["last_cents"] / row["preclose_cents"] - 1
+                                  if row["preclose_cents"] > 0 else None)
+        return {"indices": rows, "asof": now.isoformat(), "market_mode": market_mode}
+
+    @app.post("/api/real/strategy")
+    def switch_real_strategy(data: RealStrategyIn, request: Request):
+        _write_guard(request)
+        if data.strategy_id not in ("stable", "aggressive"):
+            raise HTTPException(400, "Unknown strategy")
+        with connect(config.state_db) as db, transaction(db):
+            now = datetime.now(SHANGHAI)
+            day = now.date().isoformat()
+            calendar = db.execute("""
+                SELECT value,updated_at FROM system_status
+                WHERE key='trading_calendar_today'
+            """).fetchone()
+            heartbeat = db.execute("""
+                SELECT updated_at FROM system_status WHERE key='worker_heartbeat'
+            """).fetchone()
+            if calendar is None:
+                raise HTTPException(503, "Trading calendar is not ready")
+            detail = json.loads(calendar["value"])
+            heartbeat_age = ((datetime.fromisoformat(now_utc_iso()) -
+                              datetime.fromisoformat(heartbeat["updated_at"])).total_seconds()
+                             if heartbeat else float("inf"))
+            if detail.get("date") != day or heartbeat_age > 35:
+                raise HTTPException(503, "Trading calendar is stale")
+            if not _real_switch_allowed(now, bool(detail.get("is_session"))):
+                raise HTTPException(409, "Trading strategy cannot change during market hours")
+            updated_plans = apply_real_strategy(db, day, data.strategy_id)
+            append_event(db, f"real_strategy:{uuid4().hex}", "real_strategy_changed",
+                         None, None, None,
+                         {"effective_date": day, "strategy_id": data.strategy_id,
+                          "updated_plans": updated_plans})
+        return {"strategy_id": data.strategy_id, "effective_date": day,
+                "updated_plans": updated_plans}
+
     @app.get("/api/positions/virtual")
-    def virtual_positions(status: str = "open"):
+    def virtual_positions(status: str = "open", account: str = "stable"):
+        positions_table, _ = _virtual_tables(account)
         if status not in ("open", "closed", "all"):
             raise HTTPException(400, "Invalid status")
         with connect(config.state_db) as db:
-            sql = "SELECT * FROM positions"
+            sql = f"SELECT * FROM {positions_table}"
             if status != "all":
                 sql += " WHERE status=?"
                 return _rows(db, sql + " ORDER BY id DESC", (status,))
@@ -356,11 +474,15 @@ def create_app(config: Config) -> FastAPI:
                     db.execute("""
                         INSERT INTO real_positions(
                           code,watch_id,entry_date,entry_price_cents,target_pct,
-                          initial_stop_cents,prior_peak_cents,peak_asof_date,created_at
-                        ) VALUES(?,?,?,?,?,?,?,?,?)
+                          initial_stop_cents,prior_peak_cents,peak_asof_date,created_at,
+                          strategy_id,no_partial
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                     """, (item["code"], watch["id"], watch["entry_date"], entry,
-                          watch["target_pct"], stop, entry, watch["entry_date"],
-                          now_utc_iso()))
+                          (watch["real_target_pct"] or watch["target_pct"])
+                          if not watch["real_no_partial"] else None,
+                          stop, entry, watch["entry_date"],
+                          now_utc_iso(), watch["real_strategy_id"],
+                          watch["real_no_partial"]))
                     position_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
             else:
                 pos = db.execute("""
@@ -454,47 +576,68 @@ def create_app(config: Config) -> FastAPI:
                     "virtual_trades": list(reversed(closed))[-100:][::-1]}
 
     @app.get("/api/virtual/report")
-    def virtual_report():
+    def virtual_report(account: str = "stable"):
+        if account == "aggressive":
+            day = datetime.now(SHANGHAI).date().isoformat()
+            with connect(config.state_db) as db:
+                closed = _rows(db, "SELECT * FROM aggressive_positions WHERE status='closed'")
+                wins = sum((row["closed_pnl_cents"] or 0) > 0 for row in closed)
+                return {"virtual_closed_trades": len(closed), "virtual_wins": wins,
+                        "virtual_win_rate": wins / len(closed) if closed else None,
+                        "virtual_realized_pnl_cents": sum(row["closed_pnl_cents"] or 0
+                                                          for row in closed),
+                        "virtual_cash_cents": cash_balance(db, day, account),
+                        "virtual_available_budget_cents": available_budget(db, day, account),
+                        "opportunities_without_virtual_entry": db.execute("""
+                            SELECT COUNT(*) FROM aggressive_orders
+                            WHERE status='opportunity_only'
+                        """).fetchone()[0]}
+        _virtual_tables(account)
         report = reports()
         return {key: value for key, value in report.items()
                 if key.startswith("virtual_") or key == "opportunities_without_virtual_entry"}
 
     @app.get("/api/virtual/actions")
-    def virtual_actions(page: int = 1, page_size: int = 20):
+    def virtual_actions(page: int = 1, page_size: int = 20,
+                        account: str = "stable"):
+        positions_table, legs_table = _virtual_tables(account)
         if page < 1 or not 1 <= page_size <= 100:
             raise HTTPException(400, "Invalid history page or page size")
         with connect(config.state_db) as db:
-            total = db.execute("SELECT COUNT(*) FROM virtual_legs").fetchone()[0]
+            total = db.execute(f"SELECT COUNT(*) FROM {legs_table}").fetchone()[0]
             pages = max(1, (total + page_size - 1) // page_size)
             page = min(page, pages)
-            actions = _rows(db, """
+            actions = _rows(db, f"""
                 SELECT l.id,l.position_id,p.code,l.at,l.side,l.shares,
                        l.gross_price_cents,l.fee_cents,l.cash_delta_cents,l.reason
-                FROM virtual_legs AS l JOIN positions AS p ON p.id=l.position_id
+                FROM {legs_table} AS l JOIN {positions_table} AS p ON p.id=l.position_id
                 ORDER BY l.at DESC,l.id DESC LIMIT ? OFFSET ?
             """, (page_size, (page - 1) * page_size))
             return {"actions": actions, "total": total, "page": page,
                     "page_size": page_size, "pages": pages}
 
     @app.get("/api/virtual/positions/history")
-    def virtual_position_history(page: int = 1, page_size: int = 20):
+    def virtual_position_history(page: int = 1, page_size: int = 20,
+                                 account: str = "stable"):
+        positions_table, legs_table = _virtual_tables(account)
         if page < 1 or not 1 <= page_size <= 100:
             raise HTTPException(400, "Invalid history page or page size")
         with connect(config.state_db) as db:
-            total = db.execute("SELECT COUNT(*) FROM positions WHERE status='closed'").fetchone()[0]
+            total = db.execute(
+                f"SELECT COUNT(*) FROM {positions_table} WHERE status='closed'").fetchone()[0]
             pages = max(1, (total + page_size - 1) // page_size)
             page = min(page, pages)
-            positions = _rows(db, """
+            positions = _rows(db, f"""
                 SELECT id,code,entry_date,entry_price_cents,bought_shares,
                        hold_days,buy_cash_cents,closed_pnl_cents,closed_at
-                FROM positions WHERE status='closed'
+                FROM {positions_table} WHERE status='closed'
                 ORDER BY closed_at DESC,id DESC LIMIT ? OFFSET ?
             """, (page_size, (page - 1) * page_size))
             for position in positions:
-                position["transactions"] = _rows(db, """
+                position["transactions"] = _rows(db, f"""
                     SELECT at,side,shares,gross_price_cents,fee_cents,
                            cash_delta_cents,reason
-                    FROM virtual_legs WHERE position_id=? ORDER BY at,id
+                    FROM {legs_table} WHERE position_id=? ORDER BY at,id
                 """, (position["id"],))
                 buys = [leg for leg in position["transactions"] if leg["side"] == "buy"]
                 position["buy_time"] = buys[0]["at"] if buys else None

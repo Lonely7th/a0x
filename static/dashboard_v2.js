@@ -1,4 +1,4 @@
-const state={virtual:null,real:null,virtualReport:null,virtualActions:null,virtualHistoryPage:1,virtualClosed:null,virtualClosedPage:1,realReport:null,realHistoryPage:1,realClosed:null,realClosedPage:1,health:null,quality:null,quotes:[]};
+const state={virtualAccount:'stable',virtual:null,real:null,virtualReport:null,virtualActions:null,virtualHistoryPage:1,virtualClosed:null,virtualClosedPage:1,realReport:null,realHistoryPage:1,realClosed:null,realClosedPage:1,health:null,quality:null,quotes:[],indices:null};
 const $=id=>document.getElementById(id);
 const esc=value=>String(value??"—").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const money=c=>c==null?"—":new Intl.NumberFormat("zh-CN",{style:"currency",currency:"CNY",maximumFractionDigits:2}).format(c/100);
@@ -56,10 +56,10 @@ function renderVirtual(){
   const activeWatches=v.watchlist.filter(w=>w.status==='watching'&&w.eligibility!=='held');
   $('v-date').textContent=v.date+' · 监听 '+activeWatches.length+' 只';
   $('v-watch').innerHTML=table(['排名 / 股票','买入限价','首次止盈价','单笔预算','计划股数','止盈档位','最新价','虚拟资格','虚拟状态'],activeWatches.map(w=>[
-    esc(w.rank)+' · <strong>'+esc(w.code)+'</strong>',price(w.buy_limit_cents),price(w.first_target_cents),money(w.order_budget_cents??v.settings.budget_cents),esc(w.planned_shares),pct(w.target_pct),latestPrice(w.code,v.date),tag(w.eligibility),tag(w.status)
+    esc(w.rank)+' · <strong>'+esc(w.code)+'</strong>',price(w.buy_limit_cents),w.no_partial?'不减仓':price(w.first_target_cents),money(w.order_budget_cents??v.settings.budget_cents),esc(w.planned_shares),w.no_partial?'不首次减仓':pct(w.target_pct),latestPrice(w.code,v.date),tag(w.eligibility),tag(w.status)
   ]));
-  $('v-positions').innerHTML=table(['ID / 股票','入场日','买入价','剩余股数','最新价','当前盈亏','首次目标','初始止损','移动线','状态'],v.positions.map(p=>[
-    esc(p.id)+' · <strong>'+esc(p.code)+'</strong>',esc(p.entry_date),price(p.entry_price_cents),esc(p.remaining_shares),price(p.latest_price_cents),currentPnl(p),pct(p.target_pct),price(p.initial_stop_cents),p.trailing_line_cents?price(p.trailing_line_cents):'未启用',tag(p.status)
+  $('v-positions').innerHTML=table(['ID / 股票','买入时间','买入价','剩余股数','最新价','当前盈亏','首次目标','初始止损','移动线','状态'],v.positions.map(p=>[
+    esc(p.id)+' · <strong>'+esc(p.code)+'</strong>',esc(p.buy_time?shownTime(p.buy_time):'历史记录未保存'),price(p.entry_price_cents),esc(p.remaining_shares),price(p.latest_price_cents),currentPnl(p),p.no_partial?'不首次减仓':pct(p.target_pct),price(p.initial_stop_cents),p.trailing_line_cents?price(p.trailing_line_cents):'未启用',tag(p.status)
   ]));
 }
 function renderVirtualActions(history){
@@ -102,6 +102,11 @@ function renderRealClosed(history){
 }
 function renderReal(){
   const r=state.real,report=state.realReport;if(!r||!report)return;
+  document.querySelectorAll('[data-real-strategy]').forEach(button=>{
+    button.classList.toggle('selected',button.dataset.realStrategy===r.strategy_id);
+    button.disabled=!r.can_switch_strategy;
+  });
+  $('real-strategy-note').textContent=r.can_switch_strategy?'切换立即生效；已有持仓沿用买入时的策略':'交易时段或后台日历未就绪，暂不可切换';
   const pendingBadge=$('real-pending-count');
   const pendingCount=Number(r.pending_alert_count)||0;
   pendingBadge.textContent=pendingCount>0?String(pendingCount):'';
@@ -112,16 +117,16 @@ function renderReal(){
   $('r-manual').textContent=r.positions.filter(p=>p.management_mode==='user_managed').length+' 笔';
   $('r-date').textContent=r.date;
   const heldCodes=new Set(r.positions.map(p=>p.code));
-  const buySignals=r.watchlist.filter(w=>!w.buy_signal_at&&w.watch_status!=='blocked'&&w.watch_status!=='expired'&&!heldCodes.has(w.code));
+  const buySignals=r.watchlist.filter(w=>!w.buy_signal_at&&w.real_status==='watching'&&!heldCodes.has(w.code));
   $('r-watch').innerHTML=table(['排名 / 股票','买入限价','首次止盈价','建议仓位','止盈档位','最新价','状态'],buySignals.map(w=>[
-    esc(w.rank)+' · <strong>'+esc(w.code)+'</strong>',price(w.buy_limit_cents),price(w.first_target_cents),esc(buyAllocation(w)),pct(w.target_pct),latestPrice(w.code,r.date),'等待触及限价'
+    esc(w.rank)+' · <strong>'+esc(w.code)+'</strong>',w.no_partial?'不减仓':price(w.first_target_cents),esc(buyAllocation(w)),w.no_partial?'不首次减仓':pct(w.target_pct),latestPrice(w.code,r.date),'等待触及限价'
   ]));
   const pendingSells=new Set(r.alerts.filter(a=>a.kind==='actual_sell'&&a.action_status==='pending').map(a=>a.real_position_id));
   $('r-sell-signals').innerHTML=table(['股票','记录买入价','首次止盈价','止损 / 退出线','最新价','监听状态'],r.positions.filter(p=>p.management_mode==='system').map(p=>[
-    '<strong>'+esc(p.code)+'</strong>',price(p.entry_price_cents),p.partial_done?'已完成':price(p.first_target_cents),price(p.partial_done?Math.max(p.entry_price_cents,p.trailing_line_cents):p.initial_stop_cents),latestPrice(p.code,r.date),pendingSells.has(p.id)?'卖出提醒待处理':p.partial_done?'监听余仓退出':'监听首次止盈与初始止损'
+    '<strong>'+esc(p.code)+'</strong>',price(p.entry_price_cents),p.no_partial?'不减仓':p.partial_done?'已完成':price(p.first_target_cents),price(p.partial_done?Math.max(p.entry_price_cents,p.trailing_line_cents):p.initial_stop_cents),latestPrice(p.code,r.date),pendingSells.has(p.id)?'卖出提醒待处理':p.no_partial?'监听止损与到期':p.partial_done?'监听余仓退出':'监听首次止盈与初始止损'
   ]));
   $('r-positions').innerHTML=table(['股票','买入时间','记录买入价','首次目标','初始止损','移动线','阶段','状态'],r.positions.map(p=>[
-    '<strong>'+esc(p.code)+'</strong>',esc(p.buy_signal_at?shownTime(p.buy_signal_at):'历史记录未保存'),price(p.entry_price_cents),pct(p.target_pct),price(p.initial_stop_cents),p.trailing_line_cents?price(p.trailing_line_cents):'未启用',p.partial_done?'余仓跟踪':'等待首次止盈',p.management_mode==='system'?'系统托管':'用户自行操作持仓 <button class="link" data-finish-manual="'+p.id+'">已自行清仓</button>'
+    '<strong>'+esc(p.code)+'</strong> · '+esc(p.strategy_id==='aggressive'?'激进':'稳健'),esc(p.buy_signal_at?shownTime(p.buy_signal_at):'历史记录未保存'),price(p.entry_price_cents),p.no_partial?'不首次减仓':pct(p.target_pct),price(p.initial_stop_cents),p.trailing_line_cents?price(p.trailing_line_cents):'未启用',p.no_partial?'止损与到期':p.partial_done?'余仓跟踪':'等待首次止盈',p.management_mode==='system'?'系统托管':'用户自行操作持仓 <button class="link" data-finish-manual="'+p.id+'">已自行清仓</button>'
   ]));
   const pendingAlerts=r.alerts.filter(a=>(a.kind==='real_buy'&&a.action_status==='pending'&&a.event_key.split(':')[1]===r.date)||(a.kind==='actual_sell'&&a.action_status==='pending')||(a.event_key.startsWith('actual_')&&!a.read_at));
   $('r-alerts').innerHTML=realAlerts(pendingAlerts)+(pendingCount>pendingAlerts.length?'<div class="tiny">仅显示最近 100 条提醒</div>':'');
@@ -129,10 +134,13 @@ function renderReal(){
 }
 function renderSystem(){
   const h=state.health,q=state.quality;if(!h||!q)return;
-  $('worker-badge').textContent=h.worker_healthy?'后台运行中':'后台未连接';
-  $('worker-badge').className='badge '+(h.worker_healthy?'good':'bad');
-  $('mode-badge').textContent=h.observe_only?'观察模式':'买卖提醒已启用';
-  $('mode-badge').className='badge '+(h.observe_only?'warn':'good');
+  const workerTone=h.worker_healthy?'good':h.worker_age_seconds!=null&&h.worker_age_seconds<=120?'warn':'bad';
+  const workerLabel=workerTone==='good'?'后台运行中':workerTone==='warn'?'后台心跳延迟':'后台未连接';
+  const workerBadge=$('worker-badge');
+  workerBadge.className='worker-indicator '+workerTone;
+  workerBadge.setAttribute('aria-label',workerLabel);
+  workerBadge.title=workerLabel;
+  $('mode-badge').classList.toggle('hidden',!h.observe_only);
   const quality=h.status?.daily_quality?.value;
   const quotes=h.status?.quote_health?.value;
   const problems=[];
@@ -146,24 +154,50 @@ function renderSystem(){
     esc(row.day),esc(row.provider),esc(row.polls),esc(row.requested_quotes),esc(row.received_quotes)
   ]));
 }
-function render(){renderVirtual();if(state.virtualActions)renderVirtualActions(state.virtualActions);if(state.virtualClosed)renderVirtualClosed(state.virtualClosed);renderReal();if(state.realClosed)renderRealClosed(state.realClosed);renderSystem()}
+function renderIndices(){
+  const names={'sh.000001':'上证','sz.399001':'深证','sz.399006':'创业板'};
+  const rows=state.indices?.indices||[];
+  const items=Object.entries(names).map(([code,name])=>{
+    const row=rows.find(item=>item.code===code);
+    if(!row)return '<span class="market-index">'+name+' —</span>';
+    const tone=row.change_pct>0?'pnl-profit':row.change_pct<0?'pnl-loss':'';
+    const sign=row.change_pct>0?'+':'';
+    const stamp=shownTime(row.source_time);
+    return '<span class="market-index '+(row.stale?'stale':'')+'" title="行情时间 '+esc(stamp)+(row.stale?' · 非实时':'')+'">'+name+' <strong>'+price(row.last_cents)+'</strong> <b class="'+tone+'">'+sign+pct(row.change_pct)+'</b></span>';
+  }).join('');
+  $('market-indices').innerHTML=items;
+}
+function render(){renderVirtual();if(state.virtualActions)renderVirtualActions(state.virtualActions);if(state.virtualClosed)renderVirtualClosed(state.virtualClosed);renderReal();if(state.realClosed)renderRealClosed(state.realClosed);renderSystem();renderIndices()}
 let toastTimer;
 function toast(message){const box=$('toast');box.textContent=message;box.classList.remove('hidden');clearTimeout(toastTimer);toastTimer=setTimeout(()=>box.classList.add('hidden'),5000)}
 let refreshPromise=null;
 function refresh(){
   if(refreshPromise)return refreshPromise;
+  const account=state.virtualAccount;
   refreshPromise=(async()=>{
     try{
-      const [virtual,real,virtualReport,virtualActions,virtualClosed,realReport,realClosed,health,quality,quotes]=await Promise.all([
-        api('/api/virtual'),api('/api/real'),api('/api/virtual/report'),api('/api/virtual/actions?page='+state.virtualHistoryPage),api('/api/virtual/positions/history?page='+state.virtualClosedPage),api('/api/real/report?page='+state.realHistoryPage),api('/api/real/positions/history?page='+state.realClosedPage),api('/api/health'),api('/api/quote-quality?days=5'),api('/api/quotes')
+      const [virtual,real,virtualReport,virtualActions,virtualClosed,realReport,realClosed,health,quality,quotes,indices]=await Promise.all([
+        api('/api/virtual?account='+account),api('/api/real'),api('/api/virtual/report?account='+account),api('/api/virtual/actions?account='+account+'&page='+state.virtualHistoryPage),api('/api/virtual/positions/history?account='+account+'&page='+state.virtualClosedPage),api('/api/real/report?page='+state.realHistoryPage),api('/api/real/positions/history?page='+state.realClosedPage),api('/api/health'),api('/api/quote-quality?days=5'),api('/api/quotes'),api('/api/market-indices')
       ]);
-      Object.assign(state,{virtual,real,virtualReport,virtualActions,virtualClosed,realReport,realClosed,health,quality,quotes});render();
+      if(state.virtualAccount!==account)return;
+      Object.assign(state,{virtual,real,virtualReport,virtualActions,virtualClosed,realReport,realClosed,health,quality,quotes,indices});render();
     }catch(error){toast('刷新失败：'+error.message)}
   })().finally(()=>{refreshPromise=null});
   return refreshPromise;
 }
 async function refreshAfterWrite(){if(refreshPromise)await refreshPromise;await refresh()}
-function show(view){document.querySelectorAll('.nav').forEach(button=>button.classList.toggle('active',button.dataset.view===view));document.querySelectorAll('.view').forEach(panel=>panel.classList.toggle('active',panel.id==='view-'+view))}
+function show(view){
+  document.querySelectorAll('.nav').forEach(button=>button.classList.toggle('active',button.dataset.view===view));
+  document.querySelectorAll('.view').forEach(panel=>panel.classList.toggle('active',panel.id==='view-'+(view.startsWith('virtual-')?'virtual':view)));
+  if(view.startsWith('virtual-')){
+    const account=view.slice('virtual-'.length);
+    if(state.virtualAccount!==account){
+      state.virtualAccount=account;state.virtualHistoryPage=1;state.virtualClosedPage=1;
+      state.virtual=null;state.virtualReport=null;state.virtualActions=null;state.virtualClosed=null;
+      if(refreshPromise)refreshPromise.finally(refresh);else refresh();
+    }
+  }
+}
 function showRealTab(tab){
   document.querySelectorAll('[data-real-tab]').forEach(button=>{const active=button.dataset.realTab===tab;button.classList.toggle('active',active);button.setAttribute('aria-selected',String(active))});
   document.querySelectorAll('#view-real .real-tab-panel').forEach(panel=>panel.classList.toggle('active',panel.id==='real-panel-'+tab));
@@ -173,6 +207,11 @@ function showVirtualTab(tab){
   document.querySelectorAll('#view-virtual .real-tab-panel').forEach(panel=>panel.classList.toggle('active',panel.id==='virtual-panel-'+tab));
 }
 document.querySelectorAll('.nav').forEach(button=>button.addEventListener('click',()=>show(button.dataset.view)));
+document.querySelectorAll('[data-real-strategy]').forEach(button=>button.addEventListener('click',async()=>{
+  button.disabled=true;
+  try{const result=await api('/api/real/strategy',{method:'POST',body:JSON.stringify({strategy_id:button.dataset.realStrategy})});toast('已切换为'+(result.strategy_id==='stable'?'稳健':'激进')+'策略');await refreshAfterWrite()}
+  catch(error){toast(error.message)}finally{button.disabled=false}
+}));
 document.querySelectorAll('[data-real-tab]').forEach(button=>button.addEventListener('click',()=>showRealTab(button.dataset.realTab)));
 document.querySelectorAll('[data-virtual-tab]').forEach(button=>button.addEventListener('click',()=>showVirtualTab(button.dataset.virtualTab)));
 document.querySelectorAll('.refresh').forEach(button=>button.addEventListener('click',refresh));
@@ -183,7 +222,7 @@ document.addEventListener('click',async event=>{
     try{
       if(refreshPromise)await refreshPromise;
       const next=state.virtualClosedPage+(target.dataset.virtualPositionsPage==='next'?1:-1);
-      const history=await api('/api/virtual/positions/history?page='+next);
+      const history=await api('/api/virtual/positions/history?account='+state.virtualAccount+'&page='+next);
       state.virtualClosed=history;renderVirtualClosed(history);
     }catch(error){toast(error.message);target.disabled=false}
     return;
@@ -203,7 +242,7 @@ document.addEventListener('click',async event=>{
     try{
       if(refreshPromise)await refreshPromise;
       const next=state.virtualHistoryPage+(target.dataset.virtualHistoryPage==='next'?1:-1);
-      const history=await api('/api/virtual/actions?page='+next);
+      const history=await api('/api/virtual/actions?account='+state.virtualAccount+'&page='+next);
       state.virtualActions=history;renderVirtualActions(history);
     }catch(error){toast(error.message);target.disabled=false}
     return;

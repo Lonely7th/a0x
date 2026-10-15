@@ -99,6 +99,12 @@ def run_worker(config: Config, *, once: bool = False) -> None:
                                              today + timedelta(days=30))
                         last_calendar = today
                     is_session = market.session_on(today)
+                    with transaction(engine.db):
+                        set_status(engine.db, "trading_calendar_today",
+                                   {"date": day, "is_session": is_session,
+                                    "next_session": market.next_session(today).isoformat()})
+                    if not continuous_session(current):
+                        engine._schedule_index_update(today, interval_seconds=1800)
                     if last_catalog != today and (not is_session or
                                                   current.time() < clock_time(9, 20)):
                         market.sync_catalog()
