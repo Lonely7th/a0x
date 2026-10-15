@@ -307,6 +307,11 @@ CREATE TABLE IF NOT EXISTS real_strategy_schedule (
   strategy_id TEXT NOT NULL CHECK(strategy_id IN ('stable','aggressive')),
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS virtual_funding_modes (
+  account TEXT PRIMARY KEY CHECK(account IN ('stable','aggressive')),
+  mode TEXT NOT NULL CHECK(mode IN ('cash_100w','leveraged_5x')),
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS market_indices (
   code TEXT PRIMARY KEY,
   last_cents INTEGER NOT NULL,
@@ -511,6 +516,14 @@ def cash_balance(db: sqlite3.Connection, on_date: str, account: str = "stable") 
     capital = setting_for(db, on_date)["capital_cents"]
     flows = db.execute("SELECT COALESCE(SUM(cash_delta_cents),0) FROM virtual_legs").fetchone()[0]
     return int(capital + flows)
+
+
+def virtual_funding_mode(db: sqlite3.Connection, account: str) -> str:
+    if account not in ("stable", "aggressive"):
+        raise ValueError(account)
+    row = db.execute("SELECT mode FROM virtual_funding_modes WHERE account=?",
+                     (account,)).fetchone()
+    return str(row[0]) if row else "leveraged_5x"
 
 
 def real_strategy_for(db: sqlite3.Connection, on_date: str) -> str:

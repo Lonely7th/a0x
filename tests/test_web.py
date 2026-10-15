@@ -10,6 +10,69 @@ from assistant.storage import connect, init_db, set_status
 from assistant.web import _event_cursor, _real_switch_allowed, create_app
 
 
+def test_virtual_funding_switch_preserves_existing_trades_and_budget(tmp_path: Path):
+    state = tmp_path / "state.sqlite"
+    init_db(state)
+    client = TestClient(create_app(Config(state_db=state, market_db=tmp_path / "unused.duckdb")))
+    day = datetime.now(SHANGHAI).date().isoformat()
+    stamp = datetime.now(SHANGHAI).isoformat()
+    with connect(state) as db:
+        settings_id = db.execute("SELECT id FROM settings LIMIT 1").fetchone()[0]
+        watch_id = db.execute("""
+            INSERT INTO watchlist(entry_date,signal_date,code,rank,ret5,ret20,atr14,
+                q_close,raw_close,liquidity20,buy_limit_cents,target_pct,
+                settings_id,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (day, day, "sh.600001", 1, -.12, -.11, .2, 10, 10,
+                200_000_000, 1000, ".10", settings_id, stamp)).lastrowid
+        position_id = db.execute("""
+            INSERT INTO positions(watch_id,code,entry_date,entry_price_cents,
+                bought_shares,remaining_shares,target_pct,initial_stop_cents,
+                prior_peak_cents,peak_asof_date,reserved_cents,buy_cash_cents,
+                closed_pnl_cents,status,settings_id,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (watch_id, "sh.600001", day, 1000, 100, 0, ".10", 950,
+                1000, day, 100_000, 100_000, 10_000, "closed", settings_id,
+                stamp)).lastrowid
+        for side, cash_delta, price in (("buy", -100_000, 1000),
+                                        ("sell", 110_000, 1100)):
+            db.execute("""
+                INSERT INTO virtual_legs(position_id,side,shares,gross_price_cents,
+                    cash_delta_cents,fee_cents,quote_event_key,reason,at)
+                VALUES(?,?,?,?,?,?,?,?,?)
+            """, (position_id, side, 100, price, cash_delta, 0,
+                  f"test:{side}", side, stamp))
+        original = (db.execute("SELECT * FROM positions").fetchall(),
+                    db.execute("SELECT * FROM virtual_legs").fetchall(),
+                    db.execute("SELECT * FROM settings").fetchall())
+
+    init_db(state)  # Existing installs add the new display table at startup.
+    stable = client.get("/api/virtual?account=stable").json()
+    aggressive = client.get("/api/virtual?account=aggressive").json()
+    assert stable["funding_mode"] == aggressive["funding_mode"] == "leveraged_5x"
+    assert stable["capital_cents"] == 100_000_000
+    assert stable["display_capital_cents"] == 20_000_000
+    assert stable["book_pnl_cents"] == 10_000
+    assert stable["book_pnl_pct"] == 10_000 / 20_000_000
+    assert client.post("/api/virtual/funding-mode", json={
+        "account": "stable", "mode": "cash_100w"}).status_code == 200
+    cash = client.get("/api/virtual?account=stable").json()
+    assert cash["display_capital_cents"] == 100_000_000
+    assert cash["book_pnl_cents"] == stable["book_pnl_cents"]
+    assert cash["book_pnl_pct"] == stable["book_pnl_pct"] / 5
+    assert cash["available_budget_cents"] == stable["available_budget_cents"]
+    assert cash["cash_cents"] == stable["cash_cents"]
+    assert client.get("/api/virtual?account=aggressive").json()["funding_mode"] == "leveraged_5x"
+    assert client.post("/api/virtual/funding-mode", json={
+        "account": "aggressive", "mode": "cash_100w"}).status_code == 200
+    assert client.post("/api/virtual/funding-mode", json={
+        "account": "stable", "mode": "invalid"}).status_code == 422
+    with connect(state) as db:
+        assert db.execute("SELECT * FROM positions").fetchall() == original[0]
+        assert db.execute("SELECT * FROM virtual_legs").fetchall() == original[1]
+        assert db.execute("SELECT * FROM settings").fetchall() == original[2]
+
+
 def test_event_stream_starts_at_latest_event_and_can_resume(tmp_path: Path):
     state = tmp_path / "state.sqlite"
     init_db(state)

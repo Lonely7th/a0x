@@ -5,6 +5,7 @@ import json
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
@@ -17,10 +18,12 @@ from .config import Config, SHANGHAI, now_utc_iso
 from .money import cents
 from .storage import (alert, append_event, apply_real_strategy, available_budget, cash_balance,
                       connect, next_effective_calendar_date, real_strategy_for,
-                      setting_for, transaction)
+                      setting_for, transaction, virtual_funding_mode)
 from .strategy import first_target_cents, initial_stop_cents, stop_distance
 
 ROOT = Path(__file__).resolve().parents[1]
+VIRTUAL_TRADING_CAPITAL_CENTS = 100_000_000
+VIRTUAL_LEVERAGED_OWN_CAPITAL_CENTS = 20_000_000
 
 
 def _rows(db, sql: str, params: tuple = ()) -> list[dict]:
@@ -59,6 +62,19 @@ class SettingsIn(BaseModel):
 
 class RealStrategyIn(BaseModel):
     strategy_id: str
+
+
+class VirtualFundingModeIn(BaseModel):
+    account: Literal["stable", "aggressive"]
+    mode: Literal["cash_100w", "leveraged_5x"]
+
+
+def _virtual_funding_view(total_asset_cents: int, mode: str) -> dict:
+    own_capital = (VIRTUAL_LEVERAGED_OWN_CAPITAL_CENTS if mode == "leveraged_5x"
+                   else VIRTUAL_TRADING_CAPITAL_CENTS)
+    pnl = total_asset_cents - VIRTUAL_TRADING_CAPITAL_CENTS
+    return {"funding_mode": mode, "display_capital_cents": own_capital,
+            "book_pnl_cents": pnl, "book_pnl_pct": pnl / own_capital}
 
 
 def _virtual_tables(account: str) -> tuple[str, str]:
@@ -225,6 +241,7 @@ def create_app(config: Config) -> FastAPI:
                                quotes.get(position["code"], position["entry_price_cents"])
                                for position in positions)
             cash = cash_balance(db, day, account)
+            funding_mode = virtual_funding_mode(db, account)
             watchlist = _rows(db, """
                 SELECT * FROM watchlist WHERE entry_date=? ORDER BY rank
             """, (day,))
@@ -248,6 +265,7 @@ def create_app(config: Config) -> FastAPI:
                 "cash_cents": cash,
                 "positions_market_value_cents": market_value,
                 "total_asset_cents": cash + market_value,
+                **_virtual_funding_view(cash + market_value, funding_mode),
                 "valuation_fallback_codes": unquoted,
                 "settings": setting,
                 "watchlist": watchlist,
@@ -262,6 +280,23 @@ def create_app(config: Config) -> FastAPI:
                     ORDER BY id DESC LIMIT 100
                 """) if account == "stable" else [],
             }
+
+    @app.post("/api/virtual/funding-mode")
+    def update_virtual_funding_mode(data: VirtualFundingModeIn, request: Request):
+        _write_guard(request)
+        with connect(config.state_db) as db, transaction(db):
+            previous = virtual_funding_mode(db, data.account)
+            if previous != data.mode:
+                db.execute("""
+                    INSERT INTO virtual_funding_modes(account,mode,updated_at)
+                    VALUES(?,?,?) ON CONFLICT(account) DO UPDATE SET
+                      mode=excluded.mode,updated_at=excluded.updated_at
+                """, (data.account, data.mode, now_utc_iso()))
+                append_event(db, f"virtual_funding_mode:{data.account}:{uuid4()}",
+                             "virtual_funding_mode_changed", None, None, None,
+                             {"account": data.account, "mode": data.mode})
+        return {"account": data.account, "mode": data.mode,
+                "changed": previous != data.mode}
 
     @app.get("/api/real")
     def real_board():

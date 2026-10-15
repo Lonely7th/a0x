@@ -13,6 +13,7 @@ const escapeHtml = value => String(value ?? '—').replace(/[&<>"']/g, char => (
 const money = cents => cents == null ? '—' : new Intl.NumberFormat('zh-CN', {
   style: 'currency', currency: 'CNY', maximumFractionDigits: 2,
 }).format(cents / 100);
+const signedMoney = cents => cents == null ? '—' : (cents > 0 ? '+' : '') + money(cents);
 const yuan = cents => cents == null ? '—' : (cents / 100).toFixed(2) + ' 元';
 const percent = value => value == null ? '—' : (Number(value) * 100).toFixed(2) + '%';
 const signedPercent = value => value == null ? '—' : (value > 0 ? '+' : '') + percent(value);
@@ -45,8 +46,11 @@ function badge(value) {
   return `<span class="badge">${escapeHtml(statusNames[value] || value)}</span>`;
 }
 
-async function api(path) {
-  const response = await fetch(path, {headers: {'Accept': 'application/json'}});
+async function api(path, options = {}) {
+  const response = await fetch(path, {...options, headers: {
+    'Accept': 'application/json', 'Content-Type': 'application/json',
+    ...(options.headers || {}),
+  }});
   if (!response.ok) throw new Error(`请求失败（${response.status}）`);
   return response.json();
 }
@@ -58,19 +62,19 @@ function latestWatchPrice(watch, quotes, day) {
 }
 
 function renderOverview(board, quotes) {
-  byId('capital').textContent = money(board.capital_cents);
+  byId('capital').textContent = board.funding_mode === 'leveraged_5x' ? '20万 5倍杠杆' : '100万';
   byId('available').textContent = money(board.available_budget_cents);
   byId('cash').textContent = money(board.cash_cents);
-  byId('assets').textContent = money(board.total_asset_cents);
-  const assetReturn = board.capital_cents > 0 ?
-    board.total_asset_cents / board.capital_cents - 1 : null;
+  byId('assets').textContent = signedMoney(board.book_pnl_cents);
+  byId('assets').className = pnlTone(board.book_pnl_cents);
+  const assetReturn = board.book_pnl_pct;
   const returnNode = byId('asset-return');
   returnNode.textContent = signedPercent(assetReturn);
   returnNode.className = 'asset-return ' + pnlTone(assetReturn);
   const missing = board.valuation_fallback_codes || [];
   const note = byId('valuation-note');
   note.hidden = missing.length === 0;
-  note.textContent = missing.length ? '部分持仓缺少报价，当前本金按买入价估算。' : '';
+  note.textContent = missing.length ? '部分持仓缺少报价，账面盈亏按买入价估算。' : '';
 
   const watches = board.watchlist.filter(row =>
     row.status === 'watching' && row.eligibility !== 'held');
@@ -103,6 +107,14 @@ function renderOverview(board, quotes) {
         ${fact('移动线', row.trailing_line_cents ? yuan(row.trailing_line_cents) : '未启用')}
       </div>
     </article>`).join('') : empty('暂无当前持仓');
+}
+
+function renderFundingMode(board) {
+  document.querySelectorAll('[data-funding-mode]').forEach(button => {
+    const selected = button.dataset.fundingMode === board.funding_mode;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-pressed', String(selected));
+  });
 }
 
 function renderActions(history) {
@@ -165,14 +177,19 @@ async function load() {
       ]);
       if (token !== state.requestToken) return;
       renderOverview(board, quotes);
+      renderFundingMode(board);
     } else if (tab === 'actions') {
       const history = await api(`/api/virtual/actions?account=${account}&page=${actionsPage}`);
       if (token !== state.requestToken) return;
       renderActions(history);
-    } else {
+    } else if (tab === 'positions') {
       const history = await api(`/api/virtual/positions/history?account=${account}&page=${positionsPage}`);
       if (token !== state.requestToken) return;
       renderHistory(history);
+    } else {
+      const board = await api(`/api/virtual?account=${account}`);
+      if (token !== state.requestToken) return;
+      renderFundingMode(board);
     }
     byId('sync-status').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', {
       timeZone: 'Asia/Shanghai', hour12: false,
@@ -221,6 +238,22 @@ document.querySelectorAll('[data-account]').forEach(button => button.addEventLis
 
 document.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => {
   if (button.dataset.tab !== state.tab) showTab(button.dataset.tab);
+}));
+
+document.querySelectorAll('[data-funding-mode]').forEach(button => button.addEventListener('click', async () => {
+  if (button.classList.contains('active')) return;
+  const account = state.account;
+  button.disabled = true;
+  try {
+    await api('/api/virtual/funding-mode', {
+      method: 'POST', body: JSON.stringify({account, mode: button.dataset.fundingMode}),
+    });
+    await load();
+  } catch (error) {
+    byId('sync-status').textContent = '切换失败：' + error.message;
+  } finally {
+    button.disabled = false;
+  }
 }));
 
 document.querySelectorAll('[data-page]').forEach(button => button.addEventListener('click', () => {

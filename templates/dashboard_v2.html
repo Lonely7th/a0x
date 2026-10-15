@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>A0x · OPENAI-A</title>
   <link rel="icon" type="image/png" href="/static/a0x-icon.png">
-  <link rel="stylesheet" href="/static/app.css?v=virtual-capital-return-inline-1">
+  <link rel="stylesheet" href="/static/app.css?v=virtual-funding-mode-1">
 </head>
 <body>
   <header class="topbar">
@@ -25,13 +25,14 @@
           <button id="virtual-tab-overview" class="real-tab active" type="button" role="tab" aria-selected="true" aria-controls="virtual-panel-overview" data-virtual-tab="overview">概览</button>
           <button id="virtual-tab-actions" class="real-tab" type="button" role="tab" aria-selected="false" aria-controls="virtual-panel-actions" data-virtual-tab="actions">操作记录</button>
           <button id="virtual-tab-positions" class="real-tab" type="button" role="tab" aria-selected="false" aria-controls="virtual-panel-positions" data-virtual-tab="positions">历史持仓</button>
+          <button id="virtual-tab-settings" class="real-tab" type="button" role="tab" aria-selected="false" aria-controls="virtual-panel-settings" data-virtual-tab="settings">设置</button>
         </div>
         <section id="virtual-panel-overview" class="real-tab-panel active" role="tabpanel" aria-labelledby="virtual-tab-overview" tabindex="0">
         <div class="metrics">
           <article class="metric"><span>初始本金</span><strong id="v-capital">—</strong></article>
           <article class="metric"><span>可部署预算</span><strong id="v-available">—</strong></article>
           <article class="metric"><span>账面现金</span><strong id="v-cash">—</strong></article>
-          <article class="metric"><span>当前本金<small id="v-assets-pnl" class="asset-pnl">—</small></span><strong id="v-assets">—</strong><small id="v-assets-note" class="tiny hidden"></small></article>
+          <article class="metric"><span>账面盈亏<small id="v-assets-pnl" class="asset-pnl">—</small></span><strong id="v-assets">—</strong><small id="v-assets-note" class="tiny hidden"></small></article>
         </div>
         <article class="panel"><div class="panel-head"><h2>当前候选股</h2><span id="v-date" class="tiny">—</span></div><div id="v-watch"></div></article>
         <article class="panel"><h2>当前持仓</h2><div id="v-positions"></div></article>
@@ -45,6 +46,9 @@
           <article class="panel"><h2>历史持仓</h2><div id="v-closed-positions"></div>
             <div class="pager"><button class="secondary" type="button" data-virtual-positions-page="prev">上一页</button><span id="v-positions-page" aria-live="polite">—</span><button class="secondary" type="button" data-virtual-positions-page="next">下一页</button></div>
           </article>
+        </section>
+        <section id="virtual-panel-settings" class="real-tab-panel" role="tabpanel" aria-labelledby="virtual-tab-settings" tabindex="0">
+          <article class="panel"><h2>资金模式</h2><div class="strategy-switch"><button type="button" class="secondary" data-virtual-funding="cash_100w">100万</button><button type="button" class="secondary" data-virtual-funding="leveraged_5x">20万 5倍杠杆</button></div><p class="tiny">两种模式共用 100 万元交易资金和同一组交易记录；切换只影响初始本金及账面盈亏率。</p></article>
         </section>
       </section>
       <section id="view-real" class="view active">
@@ -89,6 +93,6 @@
     </div>
   </main>
   <div id="toast" class="toast hidden"></div>
-  <script src="/static/dashboard_v2.js?v=virtual-capital-return-inline-1" defer></script>
+  <script src="/static/dashboard_v2.js?v=virtual-funding-mode-1" defer></script>
 </body>
 </html>

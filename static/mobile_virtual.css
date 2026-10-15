@@ -24,7 +24,7 @@ button:focus-visible, summary:focus-visible { outline: 2px solid #3369b5; outlin
 .account-switch { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; padding: 5px; border-radius: 12px; background: #e8ecf0; }
 .account-switch button { min-height: 42px; border: 0; border-radius: 9px; color: #5c6670; background: transparent; font-weight: 600; }
 .account-switch button.active { color: #fff; background: #1b2229; box-shadow: 0 1px 3px #1b222933; }
-.tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; margin-top: 14px; border-bottom: 1px solid #d9dfe4; }
+.tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; margin-top: 14px; border-bottom: 1px solid #d9dfe4; }
 .tabs button { min-height: 44px; padding: 7px 2px; border: 0; border-bottom: 3px solid transparent; color: #68717a; background: none; font-size: 14px; white-space: nowrap; }
 .tabs button.active { border-bottom-color: #1b2229; color: #1b2229; font-weight: 700; }
 .sync-status { min-height: 20px; margin: 10px 0 13px; color: #6c7580; font-size: 12px; }
@@ -35,10 +35,18 @@ button:focus-visible, summary:focus-visible { outline: 2px solid #3369b5; outlin
 .metric span { display: block; color: #626d78; font-size: 12px; }
 .metric.capital span { color: #cfd6dc; }
 .metric strong { display: block; margin-top: 16px; font-size: clamp(15px, 4.1vw, 23px); line-height: 1.15; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.metric.capital strong { font-size: clamp(14px, 3.5vw, 19px); }
 .asset-return { margin-left: 3px; font-size: 11px; font-weight: 700; }
 .profit { color: #aa2d00 !important; }
 .loss { color: #006400 !important; }
 .valuation-note { margin: 10px 0 0; color: #8a570b; font-size: 12px; }
+.settings-card { padding: 17px; border: 1px solid #e3e7eb; border-radius: 11px; background: #fff; }
+.settings-card h2 { margin: 0 0 14px; font-size: 17px; }
+.settings-card p { margin: 14px 0 0; color: #68737d; font-size: 12px; line-height: 1.6; }
+.funding-switch { display: flex; flex-wrap: wrap; gap: 8px; }
+.funding-switch button { min-height: 40px; padding: 0 14px; border: 1px solid #d5dbe0; border-radius: 8px; color: #25303a; background: #fff; font-size: 13px; }
+.funding-switch button.active { border-color: #1b2229; color: #fff; background: #1b2229; }
+.funding-switch button:disabled { opacity: .55; cursor: default; }
 
 .content-section { margin-top: 25px; }
 .content-section h2 { margin: 0 0 12px; font-size: 17px; font-weight: 700; }

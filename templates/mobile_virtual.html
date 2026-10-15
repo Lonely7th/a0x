@@ -6,8 +6,8 @@
   <meta name="theme-color" content="#f5f7f8">
   <title>虚拟盘 · A0x</title>
   <link rel="icon" type="image/png" href="/static/a0x-icon.png">
-  <link rel="stylesheet" href="/static/mobile_virtual.css?v=1">
-  <script src="/static/mobile_virtual.js?v=1" defer></script>
+  <link rel="stylesheet" href="/static/mobile_virtual.css?v=virtual-funding-mode-1">
+  <script src="/static/mobile_virtual.js?v=virtual-funding-mode-1" defer></script>
 </head>
 <body>
   <div class="mobile-shell">
@@ -29,6 +29,7 @@
         <button type="button" data-tab="overview" class="active" aria-current="page">概览</button>
         <button type="button" data-tab="actions">操作记录</button>
         <button type="button" data-tab="positions">历史持仓</button>
+        <button type="button" data-tab="settings">设置</button>
       </nav>
 
       <p id="sync-status" class="sync-status" role="status" aria-live="polite">正在获取数据…</p>
@@ -38,7 +39,7 @@
           <article class="metric capital"><span>初始本金</span><strong id="capital">—</strong></article>
           <article class="metric"><span>可部署预算</span><strong id="available">—</strong></article>
           <article class="metric"><span>账面现金</span><strong id="cash">—</strong></article>
-          <article class="metric"><span>当前本金 <small id="asset-return" class="asset-return">—</small></span><strong id="assets">—</strong></article>
+          <article class="metric"><span>账面盈亏 <small id="asset-return" class="asset-return">—</small></span><strong id="assets">—</strong></article>
         </div>
         <p id="valuation-note" class="valuation-note" hidden></p>
 
@@ -69,6 +70,17 @@
           <button type="button" data-page="positions-prev">上一页</button>
           <span id="positions-page" aria-live="polite">—</span>
           <button type="button" data-page="positions-next">下一页</button>
+        </div>
+      </section>
+
+      <section id="panel-settings" class="tab-panel" aria-label="虚拟盘设置" hidden>
+        <div class="settings-card">
+          <h2>资金模式</h2>
+          <div class="funding-switch">
+            <button type="button" data-funding-mode="cash_100w" aria-pressed="false">100万</button>
+            <button type="button" data-funding-mode="leveraged_5x" aria-pressed="false">20万 5倍杠杆</button>
+          </div>
+          <p>两种模式共用 100 万元交易资金和同一组交易记录；切换只影响初始本金及账面盈亏率。</p>
         </div>
       </section>
     </main>

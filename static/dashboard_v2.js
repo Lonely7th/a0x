@@ -2,6 +2,7 @@ const state={virtualAccount:'stable',virtual:null,real:null,virtualReport:null,v
 const $=id=>document.getElementById(id);
 const esc=value=>String(value??"—").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const money=c=>c==null?"—":new Intl.NumberFormat("zh-CN",{style:"currency",currency:"CNY",maximumFractionDigits:2}).format(c/100);
+const signedMoney=c=>c==null?"—":(c>0?'+':'')+money(c);
 const price=c=>c==null?"—":(c/100).toFixed(2);
 const pct=n=>n==null?"—":(Number(n)*100).toFixed(2)+"%";
 const pnlClass=value=>value>0?'pnl-profit':value<0?'pnl-loss':'';
@@ -46,16 +47,22 @@ function realAlerts(rows){
 }
 function renderVirtual(){
   const v=state.virtual,r=state.virtualReport;if(!v||!r)return;
-  $('v-capital').textContent=money(v.capital_cents);
+  document.querySelectorAll('[data-virtual-funding]').forEach(button=>{
+    const selected=button.dataset.virtualFunding===v.funding_mode;
+    button.classList.toggle('selected',selected);
+    button.setAttribute('aria-pressed',String(selected));
+  });
+  $('v-capital').textContent=v.funding_mode==='leveraged_5x'?'20万 5倍杠杆':'100万';
   $('v-available').textContent=money(v.available_budget_cents);
   $('v-cash').textContent=money(v.cash_cents);
-  $('v-assets').textContent=money(v.total_asset_cents);
-  const assetReturn=v.capital_cents>0?v.total_asset_cents/v.capital_cents-1:null;
+  $('v-assets').textContent=signedMoney(v.book_pnl_cents);
+  $('v-assets').className=pnlClass(v.book_pnl_cents);
+  const assetReturn=v.book_pnl_pct;
   const assetPnl=$('v-assets-pnl');
   assetPnl.textContent=assetReturn==null?'—':(assetReturn>0?'+':'')+pct(assetReturn);
   assetPnl.className='asset-pnl '+pnlClass(assetReturn);
   const assetNote=$('v-assets-note');
-  assetNote.textContent=v.valuation_fallback_codes.length?'部分持仓缺少报价，按买入价估算':'';
+  assetNote.textContent=v.valuation_fallback_codes.length?'部分持仓缺少报价，账面盈亏按买入价估算':'';
   assetNote.classList.toggle('hidden',!v.valuation_fallback_codes.length);
   const activeWatches=v.watchlist.filter(w=>w.status==='watching'&&w.eligibility!=='held');
   $('v-date').textContent=v.date+' · 监听 '+activeWatches.length+' 只';
@@ -215,6 +222,17 @@ document.querySelectorAll('[data-real-strategy]').forEach(button=>button.addEven
   button.disabled=true;
   try{const result=await api('/api/real/strategy',{method:'POST',body:JSON.stringify({strategy_id:button.dataset.realStrategy})});toast('已切换为'+(result.strategy_id==='stable'?'稳健':'激进')+'策略');await refreshAfterWrite()}
   catch(error){toast(error.message)}finally{button.disabled=false}
+}));
+document.querySelectorAll('[data-virtual-funding]').forEach(button=>button.addEventListener('click',async()=>{
+  const account=state.virtualAccount;
+  const mode=button.dataset.virtualFunding;
+  if(state.virtual?.funding_mode===mode)return;
+  button.disabled=true;
+  try{
+    await api('/api/virtual/funding-mode',{method:'POST',body:JSON.stringify({account,mode})});
+    await refreshAfterWrite();
+    toast('资金模式已切换为'+button.textContent.trim());
+  }catch(error){toast(error.message)}finally{button.disabled=false}
 }));
 document.querySelectorAll('[data-real-tab]').forEach(button=>button.addEventListener('click',()=>showRealTab(button.dataset.realTab)));
 document.querySelectorAll('[data-virtual-tab]').forEach(button=>button.addEventListener('click',()=>showVirtualTab(button.dataset.virtualTab)));
