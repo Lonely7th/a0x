@@ -13,6 +13,7 @@
 .real-tabs{display:flex;gap:8px;overflow:auto;border-bottom:1px solid #ddd;margin-bottom:20px}.real-tab{flex:none;padding:12px 18px;background:transparent;border:0;border-bottom:3px solid transparent;color:#62666e;font-size:14px}.real-tab:hover{color:#181d26;background:#f8fafc}.real-tab.active{color:#181d26;border-bottom-color:#181d26;font-weight:600}.real-tab-panel{display:none}.real-tab-panel.active{display:block}
 h2{font-size:18px;font-weight:500;margin:0 0 18px}
 .metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:18px}.metric{min-width:0;padding:22px;background:#fff;border:1px solid #ddd;border-radius:10px;min-height:112px}.metric:first-child{background:#181d26;border-color:#181d26;color:#fff}.metric:first-child span{color:#d9dde3}.metric span{display:block;color:#62666e;font-size:12px}.metric strong{display:block;font-size:27px;margin-top:15px;font-weight:500;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.metric .asset-pnl{display:inline;margin-left:6px;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums}.metric .asset-pnl.pnl-profit{color:#aa2d00}.metric .asset-pnl.pnl-loss{color:#006400}
 .real-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}
 .grid-two{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px}.panel{padding:22px 24px;background:#fff;border:1px solid #ddd;border-radius:10px;margin-bottom:18px;min-width:0}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.panel-head h2{margin-bottom:18px}
 .system-panel-head{margin-bottom:18px}.system-panel-head h2{margin:0}.system-panel-head .refresh{padding:7px 12px;font-size:12px;white-space:nowrap}
@@ -41,7 +42,7 @@ h2{font-size:18px;font-weight:500;margin:0 0 18px}
   .market-indices{gap:5px}.market-index{font-size:12px;padding:5px 7px}
   .layout{min-height:calc(100vh - 50px)}.sidebar{padding:8px}.nav{padding:8px 10px;margin:0 0 2px;font-size:12px}.content{padding:8px 12px 22px}
   .real-tabs{gap:4px;margin-bottom:7px}.real-tab{padding:7px 11px;border-bottom-width:2px;font-size:12px}
-  .metrics{gap:6px;margin-bottom:8px}.metric{padding:8px 10px;min-height:60px}.metric span{font-size:10px;white-space:nowrap}.metric strong{font-size:17px;margin-top:5px;line-height:1.2}.metric #v-capital{font-size:14px}.metric small{font-size:10px}
+  .metrics{gap:6px;margin-bottom:8px}.metric{padding:8px 10px;min-height:60px}.metric span{font-size:10px;white-space:nowrap}.metric strong{font-size:17px;margin-top:5px;line-height:1.2}.metric #v-capital{font-size:14px}.metric small{font-size:10px}.metric .asset-pnl{font-size:10px}
   .panel{padding:10px 12px;margin-bottom:8px}.panel-head h2,h2{font-size:15px;margin-bottom:7px}.panel-head .tiny{font-size:10px}.system-panel-head{margin-bottom:7px}.system-panel-head h2{margin:0}.system-panel-head .refresh{font-size:11px;padding:5px 9px}
   .history-position{padding:8px;margin-top:8px}.history-facts{gap:5px 12px;font-size:11px;margin-bottom:6px}
   table{font-size:11px}th{padding:7px 8px}td{padding:8px}.empty{padding:8px 0}.alert{padding:9px 0}.pager{margin-top:9px;gap:7px}

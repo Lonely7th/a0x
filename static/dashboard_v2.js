@@ -50,6 +50,10 @@ function renderVirtual(){
   $('v-available').textContent=money(v.available_budget_cents);
   $('v-cash').textContent=money(v.cash_cents);
   $('v-assets').textContent=money(v.total_asset_cents);
+  const assetReturn=v.capital_cents>0?v.total_asset_cents/v.capital_cents-1:null;
+  const assetPnl=$('v-assets-pnl');
+  assetPnl.textContent=assetReturn==null?'—':(assetReturn>0?'+':'')+pct(assetReturn);
+  assetPnl.className='asset-pnl '+pnlClass(assetReturn);
   const assetNote=$('v-assets-note');
   assetNote.textContent=v.valuation_fallback_codes.length?'部分持仓缺少报价，按买入价估算':'';
   assetNote.classList.toggle('hidden',!v.valuation_fallback_codes.length);
