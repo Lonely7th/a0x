@@ -41,7 +41,7 @@ bash deploy/manage.sh status
 
 `setup` 创建 `.venv/` 并安装 `requirements.txt`，同时建立仓库外的 `openai-a-data/` 数据目录。`initialize` 建立空 DuckDB 与 SQLite 数据库，获取证券目录与交易日历，回填至少三年的全市场日线和历史 ST 状态，并修复缺口、审计完整性。免费数据源的速度会影响回填时长，可能需要数小时；请保持 SSH 会话连接。若中断或某批次失败，重新运行 `initialize` 会继续处理未成功的日线批次。审计通过后才能 `start`。
 
-`start` 安装并启动两个 systemd 服务，检查后台心跳。成功后打开 `http://服务器公网IP/`。若无法访问，运行 `bash deploy/manage.sh status` 查看日志，并核对公网 TCP 80 是否放行。
+`start` 安装并启动两个 systemd 服务，检查后台心跳。成功后打开 `http://服务器公网IP/`；手机浏览器查看虚拟盘使用 `http://服务器公网IP/m`。若无法访问，运行 `bash deploy/manage.sh status` 查看日志，并核对公网 TCP 80 是否放行。
 
 服务器上的实盘记录与虚拟盘交易历史是全新的。服务器正式使用时，请停止原电脑的 `worker`，避免两套系统同时发出提醒。
 

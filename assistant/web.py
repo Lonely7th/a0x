@@ -86,6 +86,10 @@ def create_app(config: Config) -> FastAPI:
                                     "observe_only": config.observe_only}
         )
 
+    @app.get("/m", response_class=HTMLResponse)
+    def mobile_virtual_board(request: Request):
+        return templates.TemplateResponse(request, "mobile_virtual.html")
+
     @app.get("/api/health")
     def health():
         with connect(config.state_db) as db:
