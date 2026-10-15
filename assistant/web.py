@@ -190,6 +190,7 @@ def create_app(config: Config) -> FastAPI:
                      + position["remaining_shares"] * quote["last_cents"]
                      - position["buy_cash_cents"]) / position["buy_cash_cents"]
                     if valid_quote and position["buy_cash_cents"] > 0 else None)
+                position["latest_price_cents"] = quote["last_cents"] if valid_quote else None
                 position["pnl_quote_time"] = quote["source_time"] if valid_quote else None
             unquoted = [position["code"] for position in positions
                         if position["code"] not in quotes]

@@ -250,11 +250,13 @@ def test_virtual_open_position_pnl_includes_partial_sale_and_valuation(tmp_path:
     client = TestClient(create_app(Config(state_db=state, market_db=tmp_path / "unused.duckdb")))
     position = client.get("/api/virtual").json()["positions"][0]
     assert position["current_pnl_pct"] == (54940 + 50 * 980 - 100025) / 100025
+    assert position["latest_price_cents"] == 980
     assert position["pnl_quote_time"] == "2026-10-14T10:00:00+08:00"
     with connect(state) as db:
         db.execute("UPDATE quotes SET healthy=0 WHERE code='sh.600001'")
     position = client.get("/api/virtual").json()["positions"][0]
     assert position["current_pnl_pct"] is None
+    assert position["latest_price_cents"] is None
     assert position["pnl_quote_time"] is None
 
 
