@@ -52,3 +52,16 @@ h2{font-size:18px;font-weight:500;margin:0 0 18px}
 @media(orientation:landscape) and (max-height:700px) and (max-width:640px){.header-status #mode-badge{display:none}.market-index{font-size:11px;padding:4px 6px;gap:3px}#view-virtual .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.metric strong{font-size:15px}.metric #v-capital{font-size:13px}}
 @media(orientation:landscape) and (max-width:1366px) and (any-pointer:coarse){.metric #v-capital{font-size:13px}}
 @media(orientation:landscape) and (max-width:1100px){.topbar{height:auto;min-height:50px;flex-wrap:wrap}.header-status{flex-wrap:wrap}.market-indices{order:3;width:100%;justify-content:flex-end}}
+@media(min-width:760px) and (max-width:1100px){
+  .topbar{height:auto;min-height:50px;flex-wrap:nowrap;gap:8px;padding:6px 14px}
+  .header-status{flex-wrap:nowrap;min-width:0;gap:5px;margin-left:auto}
+  .market-indices{order:initial;width:auto;gap:4px}
+  .market-index{font-size:11px;padding:4px 5px;gap:3px}
+  .header-status #clock{font-size:11px;padding:5px 7px}
+}
+@media(min-width:760px) and (max-width:840px){
+  .topbar{gap:5px;padding-left:10px;padding-right:10px}
+  .brand{gap:5px}.brand-icon{width:24px;height:24px}.brand strong{font-size:14px}.brand small{font-size:9px}
+  .header-status{gap:4px}.market-indices{gap:3px}.market-index{font-size:10px;padding:4px;gap:2px}
+  .header-status #clock{font-size:10px;padding:5px 6px}
+}
