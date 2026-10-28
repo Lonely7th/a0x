@@ -125,8 +125,16 @@ def create_app(config: Config) -> FastAPI:
         if heartbeat:
             age = (datetime.fromisoformat(now_utc_iso())
                    - datetime.fromisoformat(heartbeat["at"])).total_seconds()
+        progress = status.get("worker_progress", {}).get("value", {})
+        progress_age = None
+        if progress.get("at"):
+            progress_age = (datetime.fromisoformat(now_utc_iso())
+                            - datetime.fromisoformat(progress["at"])).total_seconds()
+        progressing = (progress_age is not None
+                       and 0 <= progress_age <= progress.get("timeout_seconds", 600))
         return {"status": status, "worker_age_seconds": age,
-                "worker_healthy": age is not None and age <= 35,
+                "worker_progress_age_seconds": progress_age,
+                "worker_healthy": age is not None and 0 <= age <= 35 and progressing,
                 "observe_only": heartbeat["value"]["observe_only"] if heartbeat else config.observe_only,
                 "quote_stats_today": quote_stats}
 

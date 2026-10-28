@@ -511,3 +511,22 @@ def test_boards_are_separate_and_focus_is_hidden(tmp_path: Path):
     assert "actual_closed_realized_pnl_cents" not in client.get("/api/virtual/report").json()
     assert "virtual_realized_pnl_cents" not in client.get("/api/real/report").json()
     assert "OPENAI-A" in client.get("/").text
+
+
+def test_health_rejects_fresh_heartbeat_when_business_progress_is_stale(tmp_path):
+    from assistant.config import now_utc_iso
+    state = tmp_path / "state.sqlite"
+    init_db(state)
+    config = Config(state_db=state, market_db=tmp_path / "unused.duckdb")
+    client = TestClient(create_app(config))
+    with connect(state) as db:
+        set_status(db, "worker_heartbeat", {"observe_only": False})
+        set_status(db, "worker_progress", {
+            "at": (datetime.fromisoformat(now_utc_iso()) - timedelta(minutes=11)).isoformat(),
+            "timeout_seconds": 600, "stage": "gap query"})
+    health = client.get("/api/health").json()
+    assert health["worker_age_seconds"] < 35
+    assert health["worker_healthy"] is False
+    with connect(state) as db:
+        set_status(db, "worker_progress", {"at": now_utc_iso(), "timeout_seconds": 600})
+    assert client.get("/api/health").json()["worker_healthy"] is True

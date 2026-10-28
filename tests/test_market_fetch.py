@@ -90,3 +90,40 @@ def test_sina_native_calls_are_serialized_on_fallback(monkeypatch):
     assert maximum == 1
     assert all(source == "Sina" and len(rows) == 1
                for _, rows, source in result)
+
+
+def test_gap_timeout_aborts_sync_without_classifying_missing_data(tmp_path, monkeypatch):
+    import pytest
+    from assistant.baostock_client import BaoStockUnavailable
+    from assistant.market import MarketStore
+
+    closed = []
+
+    class BrokenSession:
+        def __init__(self, progress):
+            pass
+
+        def login(self):
+            return SimpleNamespace(error_code="0")
+
+        def query_history_k_data_plus(self, *args, **kwargs):
+            raise BaoStockUnavailable("query timed out")
+
+        def logout(self):
+            closed.append(True)
+
+    monkeypatch.setattr(market_module, "BaoStockClient", BrokenSession)
+    path = tmp_path / "market.duckdb"
+    MarketStore.initialize(path)
+    market = MarketStore(path)
+    try:
+        market.db.execute("INSERT INTO securities VALUES "
+                          "('sh.600000','sh_main','2020-01-01',NULL,'test',current_timestamp)")
+        market.db.execute("INSERT INTO trading_calendar VALUES "
+                          "('2026-10-26',true,'test',current_timestamp)")
+        with pytest.raises(BaoStockUnavailable, match="timed out"):
+            market.reconcile_missing(date(2026, 10, 26))
+        assert market.db.execute("SELECT COUNT(*) FROM daily_gap_checks").fetchone()[0] == 0
+        assert closed == [True]
+    finally:
+        market.close()

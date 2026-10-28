@@ -14,12 +14,17 @@ import duckdb
 import pandas as pd
 import requests
 
+from .baostock_client import BaoStockClient, BaoStockUnavailable
+from .progress import market_stage
+
 LOG = logging.getLogger(__name__)
 _SINA_FETCH_LOCK = threading.Lock()
 _TENCENT_DAILY_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
 
 
 def _bs_rows(result) -> list[dict]:
+    if isinstance(result, list):
+        return result
     if result.error_code != "0":
         raise RuntimeError(result.error_msg)
     out = []
@@ -137,7 +142,8 @@ def _daily_fetch(code: str, start: date, end: date) -> tuple[str, list[tuple], s
 
 
 class MarketStore:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, progress=None):
+        self.progress = progress or (lambda _stage: None)
         if not path.exists():
             raise FileNotFoundError(path)
         self.path = path
@@ -204,8 +210,9 @@ class MarketStore:
     def close(self) -> None:
         self.db.close()
 
+    @market_stage
     def sync_calendar(self, start: date, end: date) -> int:
-        import baostock as bs
+        bs = BaoStockClient(self.progress)
 
         result = bs.login()
         if result.error_code != "0":
@@ -255,8 +262,9 @@ class MarketStore:
             [entry, current],
         ).fetchone()[0])
 
+    @market_stage
     def sync_catalog(self) -> int:
-        import baostock as bs
+        bs = BaoStockClient(self.progress)
 
         result = bs.login()
         if result.error_code != "0":
@@ -293,6 +301,7 @@ class MarketStore:
               AND board IN ('sh_main','sz_main','chinext') ORDER BY code
         """, [day, day]).fetchall()]
 
+    @market_stage
     def sync_daily(self, target: date, deadline: datetime | None = None,
                    workers: int = 6) -> dict:
         # AKShare's per-symbol progress bars overwhelm the useful batch log.
@@ -319,6 +328,7 @@ class MarketStore:
             while offset < len(todo):
                 if deadline and datetime.now(deadline.tzinfo) >= deadline:
                     break
+                self.progress(f"sync_daily {target} batch={offset}/{len(todo)}")
                 batch = todo[offset:offset + 24]
                 futures = {pool.submit(_daily_fetch, code, starts[code], target): code
                            for code in batch}
@@ -384,8 +394,9 @@ class MarketStore:
         return {"target": target.isoformat(), "needed": len(todo),
                 "processed": offset, "rows_written": written, "errors": failures}
 
+    @market_stage
     def sync_st_and_classify(self, target: date, deadline: datetime | None = None) -> dict:
-        import baostock as bs
+        bs = BaoStockClient(self.progress)
 
         codes = self._active_codes(target)
         missing = [r[0] for r in self.db.execute("""
@@ -436,6 +447,8 @@ class MarketStore:
                           checked_at=excluded.checked_at
                     """, [code, target, status, "BaoStock dated status", datetime.now()])
                     checked += 1
+                except BaoStockUnavailable:
+                    raise
                 except Exception as exc:
                     failures.append(code)
                     LOG.warning("ST/status lookup failed %s: %s", code, exc)
@@ -443,10 +456,11 @@ class MarketStore:
             bs.logout()
         return {"needed": len(missing), "checked": checked, "errors": failures}
 
+    @market_stage
     def reconcile_missing(self, target: date, deadline: datetime | None = None,
                           lookback_days: int = 1100) -> dict:
         """Classify lawful missing sessions and repair traded gaps with dated BaoStock data."""
-        import baostock as bs
+        bs = BaoStockClient(self.progress)
 
         start = target - timedelta(days=lookback_days)
         gaps = self.db.execute("""
@@ -526,6 +540,8 @@ class MarketStore:
                               status=excluded.status,detail=excluded.detail,
                               checked_at=excluded.checked_at
                         """, [code, day, status, detail, datetime.now()])
+                except BaoStockUnavailable:
+                    raise
                 except Exception as exc:
                     unresolved += len(dates)
                     LOG.warning("Gap reconciliation failed for %s: %s", code, exc)
@@ -534,10 +550,11 @@ class MarketStore:
         return {"missing": len(gaps), "repaired": repaired,
                 "classified": classified, "unresolved": unresolved}
 
+    @market_stage
     def reconcile_invalid(self, target: date, deadline: datetime | None = None,
                           lookback_days: int = 1100) -> dict:
         """Repair malformed traded bars from dated BaoStock raw and adjusted rows."""
-        import baostock as bs
+        bs = BaoStockClient(self.progress)
 
         start = target - timedelta(days=lookback_days)
         bad = self.db.execute("""
@@ -601,6 +618,8 @@ class MarketStore:
                           *qvalues, values[4], values[5], raw["isST"] == "1",
                           "BaoStock invalid repair", datetime.now(), code, day])
                     repaired += 1
+                except BaoStockUnavailable:
+                    raise
                 except Exception as exc:
                     errors.append({"code": code, "date": day.isoformat(),
                                    "reason": str(exc)[:160]})
@@ -608,6 +627,7 @@ class MarketStore:
             bs.logout()
         return {"needed": len(bad), "repaired": repaired, "errors": errors}
 
+    @market_stage
     def audit(self, target: date, lookback_days: int = 1100) -> dict:
         start = target - timedelta(days=lookback_days)
         latest = self.db.execute("SELECT MAX(trade_date) FROM daily_bars").fetchone()[0]
@@ -696,12 +716,14 @@ class MarketStore:
         ).fetchone()
         return float(row[0]) if row and row[0] is not None else None
 
+    @market_stage
     def sync_minute_day(self, day: date, codes: list[str]) -> dict:
         import akshare as ak
 
         total = 0
         errors = []
         for code in sorted(set(codes)):
+            self.progress(f"sync_minute_day {day} code={code}")
             try:
                 frame = ak.stock_zh_a_minute(symbol=code.replace(".", ""), period="1", adjust="")
                 if frame.empty:

@@ -145,8 +145,10 @@ function renderReal(){
 }
 function renderSystem(){
   const h=state.health,q=state.quality;if(!h||!q)return;
-  const workerTone=h.worker_healthy?'good':h.worker_age_seconds!=null&&h.worker_age_seconds<=120?'warn':'bad';
-  const workerLabel=workerTone==='good'?'后台运行中':workerTone==='warn'?'后台心跳延迟':'后台未连接';
+  const progress=h.status?.worker_progress?.value;
+  const stalled=progress&&h.worker_progress_age_seconds>progress.timeout_seconds;
+  const workerTone=h.worker_healthy?'good':stalled?'bad':h.worker_age_seconds!=null&&h.worker_age_seconds<=120?'warn':'bad';
+  const workerLabel=stalled?'后台任务停滞，等待重启':h.worker_healthy?'后台运行中':h.worker_age_seconds!=null&&h.worker_age_seconds<=35?'后台进度待确认':workerTone==='warn'?'后台心跳延迟':'后台未连接';
   const workerBadge=$('worker-badge');
   workerBadge.className='worker-indicator '+workerTone;
   workerBadge.setAttribute('aria-label',workerLabel);
@@ -155,12 +157,12 @@ function renderSystem(){
   const quality=h.status?.daily_quality?.value;
   const quotes=h.status?.quote_health?.value;
   const problems=[];
-  if(!h.worker_healthy)problems.push('后台未连接');
+  if(!h.worker_healthy)problems.push(workerLabel);
   if(quality&&quality.ok===false)problems.push('日线质量未通过，暂停新买入');
   if(quotes&&quotes.healthy===false)problems.push('部分报价缺失，相关股票暂不触发提醒');
   $('critical-banner').textContent=problems.join('；');
   $('critical-banner').classList.toggle('hidden',!problems.length);
-  $('system-health').innerHTML=[["最近日线",quality?.latest||'尚未检查'],["日线质量",quality?(quality.ok?'通过':'未通过'):'尚未检查'],["行情来源",quotes?.provider||'—'],["缺失代码",(quotes?.missing_codes||[]).join('、')||'无'],["后台心跳",h.worker_age_seconds==null?'—':Math.round(h.worker_age_seconds)+' 秒前']].map(([name,value])=>'<div class="health-row"><span>'+esc(name)+'</span><strong>'+esc(value)+'</strong></div>').join('');
+  $('system-health').innerHTML=[["当前后台任务",progress?.stage||'尚未报告'],["任务进度",h.worker_progress_age_seconds==null?'—':Math.round(h.worker_progress_age_seconds)+' 秒前'],["最近日线",quality?.latest||'尚未检查'],["日线质量",quality?(quality.ok?'通过':'未通过'):'尚未检查'],["行情来源",quotes?.provider||'—'],["缺失代码",(quotes?.missing_codes||[]).join('、')||'无'],["后台心跳",h.worker_age_seconds==null?'—':Math.round(h.worker_age_seconds)+' 秒前']].map(([name,value])=>'<div class="health-row"><span>'+esc(name)+'</span><strong>'+esc(value)+'</strong></div>').join('');
   $('system-quality').innerHTML=table(['日期','来源','轮询','请求股次','收到股次'],(q.polls||[]).map(row=>[
     esc(row.day),esc(row.provider),esc(row.polls),esc(row.requested_quotes),esc(row.received_quotes)
   ]));

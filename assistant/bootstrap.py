@@ -67,7 +67,9 @@ def _save_daily(market: MarketStore, code: str, rows: list[tuple], start: date,
 
 
 def _sync_st_history(market: MarketStore, start: date, end: date) -> list[str]:
-    import baostock as bs
+    from .baostock_client import BaoStockClient, BaoStockUnavailable
+
+    bs = BaoStockClient(market.progress)
 
     db = market.db
     codes = [row[0] for row in db.execute("""
@@ -112,6 +114,8 @@ def _sync_st_history(market: MarketStore, start: date, end: date) -> list[str]:
                           status=excluded.status,detail=excluded.detail,
                           checked_at=excluded.checked_at
                     """, suspended)
+            except BaoStockUnavailable:
+                raise
             except Exception as exc:
                 errors.append(code)
                 LOG.warning("Historical ST/status failed %s: %s", code, exc)
